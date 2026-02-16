@@ -37,3 +37,4 @@ Thumbs.db
 *.pdf
 *.png
 *.sha256
+output/

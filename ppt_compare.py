@@ -8,7 +8,12 @@ import os
 import sys
 import tempfile
 import hashlib
+import shutil
+import subprocess
 from pathlib import Path
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 
 try:
     from pptx import Presentation
@@ -128,8 +133,14 @@ def compare_slides(dir1, dir2):
     # Create reverse mapping for dir2 (hash -> slide number)
     hash_to_slide2 = {hash_val: slide_num for slide_num, hash_val in hashes2.items()}
     
+    # Create reverse mapping for dir1 (hash -> slide number)
+    hash_to_slide1 = {hash_val: slide_num for slide_num, hash_val in hashes1.items()}
+    
     # Track which slides in dir2 have been matched
     matched_slides2 = set()
+    
+    # Store comparison results for PDF generation
+    comparisons = []
     
     # Compare slides from dir1
     for slide1 in sorted(hashes1.keys()):
@@ -138,14 +149,110 @@ def compare_slides(dir1, dir2):
             slide2 = hash_to_slide2[hash1]
             matched_slides2.add(slide2)
             print(f"slide {slide1} -> slide {slide2}")
+            comparisons.append(('matched', slide1, slide2))
         else:
             print(f"slide {slide1} only in source")
+            comparisons.append(('source_only', slide1, None))
     
     # Find slides only in dir2
     for slide2 in sorted(hashes2.keys()):
         if slide2 not in matched_slides2:
             print(f"slide {slide2} only in target")
+            comparisons.append(('target_only', None, slide2))
     
+    print("="*60)
+    
+    return comparisons, hashes1, hashes2
+
+
+def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
+    """Generate a PDF with side-by-side slide comparisons"""
+    print("\n" + "="*60)
+    print("GENERATING COMPARISON PDF")
+    print("="*60)
+    
+    # Use landscape letter size for side-by-side comparison
+    page_width, page_height = landscape(letter)
+    
+    # Create PDF
+    c = canvas.Canvas(output_path, pagesize=landscape(letter))
+    
+    # Calculate dimensions for side-by-side layout
+    margin = 36  # 0.5 inch margins
+    available_width = (page_width - 3 * margin) / 2  # Space for two images with center margin
+    available_height = page_height - 2 * margin
+    
+    for comparison_type, slide1, slide2 in comparisons:
+        # Determine which images to display
+        left_image = None
+        right_image = None
+        
+        if comparison_type == 'matched':
+            left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
+            right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
+            title = f"Source Slide {slide1} = Target Slide {slide2}"
+        elif comparison_type == 'source_only':
+            left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
+            right_image = None
+            title = f"Source Slide {slide1} (not in target)"
+        elif comparison_type == 'target_only':
+            left_image = None
+            right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
+            title = f"Target Slide {slide2} (not in source)"
+        
+        # Add title
+        c.setFont("Helvetica-Bold", 14)
+        c.drawCentredString(page_width / 2, page_height - 20, title)
+        
+        # Draw left image
+        if left_image and os.path.exists(left_image):
+            img = ImageReader(left_image)
+            img_width, img_height = img.getSize()
+            
+            # Calculate scaling to fit in available space
+            scale = min(available_width / img_width, available_height / img_height)
+            scaled_width = img_width * scale
+            scaled_height = img_height * scale
+            
+            # Center the image in the left half
+            x = margin + (available_width - scaled_width) / 2
+            y = margin + (available_height - scaled_height) / 2
+            
+            c.drawImage(left_image, x, y, width=scaled_width, height=scaled_height)
+            
+            # Add label
+            c.setFont("Helvetica", 10)
+            c.drawString(margin, margin - 15, f"Source: slide_{slide1:03d}.png")
+        
+        # Draw right image
+        if right_image and os.path.exists(right_image):
+            img = ImageReader(right_image)
+            img_width, img_height = img.getSize()
+            
+            # Calculate scaling to fit in available space
+            scale = min(available_width / img_width, available_height / img_height)
+            scaled_width = img_width * scale
+            scaled_height = img_height * scale
+            
+            # Center the image in the right half
+            x = page_width / 2 + margin + (available_width - scaled_width) / 2
+            y = margin + (available_height - scaled_height) / 2
+            
+            c.drawImage(right_image, x, y, width=scaled_width, height=scaled_height)
+            
+            # Add label
+            c.setFont("Helvetica", 10)
+            c.drawString(page_width / 2 + margin, margin - 15, f"Target: slide_{slide2:03d}.png")
+        
+        # Draw center divider line
+        c.setStrokeColorRGB(0.7, 0.7, 0.7)
+        c.setLineWidth(1)
+        c.line(page_width / 2, margin, page_width / 2, page_height - margin)
+        
+        c.showPage()
+    
+    c.save()
+    print(f"PDF saved to: {output_path}")
     print("="*60)
 
 
@@ -175,12 +282,21 @@ def process_powerpoint(ppt_path, base_temp_dir):
 def main():
     """Main function to compare two PowerPoint files"""
     
-    if len(sys.argv) != 3:
-        print("Usage: python ppt_compare.py <file1.pptx> <file2.pptx>")
+    if len(sys.argv) < 3 or len(sys.argv) > 4:
+        print("Usage: python ppt_compare.py <file1.pptx> <file2.pptx> [output_dir]")
+        print("\nArguments:")
+        print("  file1.pptx   - First PowerPoint file (source)")
+        print("  file2.pptx   - Second PowerPoint file (target)")
+        print("  output_dir   - Optional output directory for results")
+        print("                 If not specified, uses temporary directory and cleans up after displaying PDF")
         sys.exit(1)
     
     file1 = sys.argv[1]
     file2 = sys.argv[2]
+    output_dir = sys.argv[3] if len(sys.argv) == 4 else None
+    
+    # Determine if we should use temporary directory and clean up
+    use_temp_dir = output_dir is None
     
     # Validate files exist
     if not os.path.exists(file1):
@@ -191,9 +307,14 @@ def main():
         print(f"Error: File not found: {file2}")
         sys.exit(1)
     
-    # Create base temporary directory
-    base_temp_dir = tempfile.mkdtemp(prefix="ppt_compare_")
-    print(f"Created temporary directory: {base_temp_dir}")
+    # Create or use output directory
+    if use_temp_dir:
+        base_temp_dir = tempfile.mkdtemp(prefix="ppt_compare_")
+        print(f"Created temporary directory: {base_temp_dir}")
+    else:
+        base_temp_dir = output_dir
+        os.makedirs(base_temp_dir, exist_ok=True)
+        print(f"Using output directory: {base_temp_dir}")
     
     try:
         # Process both PowerPoint files
@@ -205,11 +326,40 @@ def main():
         print("="*60)
         print(f"\nFile 1 images: {output_dir1}")
         print(f"File 2 images: {output_dir2}")
-        print(f"\nBase temporary directory: {base_temp_dir}")
-        print("\nNote: Temporary directories have NOT been deleted.")
+        print(f"\nBase output directory: {base_temp_dir}")
+        
+        if not use_temp_dir:
+            print("\nNote: Output files have been saved and will NOT be deleted.")
         
         # Compare slides between the two presentations
-        compare_slides(output_dir1, output_dir2)
+        comparisons, hashes1, hashes2 = compare_slides(output_dir1, output_dir2)
+        
+        # Generate comparison PDF
+        pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
+        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons)
+        
+        print(f"\nComparison PDF: {pdf_path}")
+        
+        # Open the PDF
+        print("\nOpening PDF...")
+        try:
+            if sys.platform == 'darwin':  # macOS
+                subprocess.run(['open', pdf_path], check=True)
+            elif sys.platform == 'win32':  # Windows
+                os.startfile(pdf_path)
+            else:  # Linux
+                subprocess.run(['xdg-open', pdf_path], check=True)
+            print("PDF opened successfully")
+        except Exception as e:
+            print(f"Could not open PDF automatically: {e}")
+            print(f"Please open manually: {pdf_path}")
+        
+        # If using temporary directory, wait for user to view PDF then clean up
+        if use_temp_dir:
+            input("\nPress Enter to close the PDF and clean up temporary files...")
+            print("\nCleaning up temporary files...")
+            shutil.rmtree(base_temp_dir)
+            print("Temporary files deleted.")
         
     except Exception as e:
         print(f"\nError during processing: {e}")
