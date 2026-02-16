@@ -124,7 +124,8 @@ def load_slide_hashes(output_dir):
 
 
 def compare_slides(dir1, dir2):
-    """Compare slides between two directories and create a mapping"""
+    """Compare slides between two directories and create a mapping.
+    Handles duplicate slides (same hash) correctly by tracking counts."""
     print("\n" + "="*60)
     print("SLIDE COMPARISON")
     print("="*60)
@@ -132,31 +133,59 @@ def compare_slides(dir1, dir2):
     hashes1 = load_slide_hashes(dir1)
     hashes2 = load_slide_hashes(dir2)
     
-    # Create reverse mapping for dir2 (hash -> slide number)
-    hash_to_slide2 = {hash_val: slide_num for slide_num, hash_val in hashes2.items()}
+    # Count occurrences of each hash in both presentations
+    from collections import defaultdict, Counter
     
-    # Create reverse mapping for dir1 (hash -> slide number)
-    hash_to_slide1 = {hash_val: slide_num for slide_num, hash_val in hashes1.items()}
+    hash_count1 = Counter(hashes1.values())
+    hash_count2 = Counter(hashes2.values())
     
-    # Track which slides in dir2 have been matched
+    # Create lists of slides grouped by hash for matching
+    hash_to_slides1 = defaultdict(list)
+    hash_to_slides2 = defaultdict(list)
+    
+    for slide_num, hash_val in hashes1.items():
+        hash_to_slides1[hash_val].append(slide_num)
+    
+    for slide_num, hash_val in hashes2.items():
+        hash_to_slides2[hash_val].append(slide_num)
+    
+    # Sort the lists to ensure consistent matching
+    for hash_val in hash_to_slides1:
+        hash_to_slides1[hash_val].sort()
+    for hash_val in hash_to_slides2:
+        hash_to_slides2[hash_val].sort()
+    
+    # Track which slides have been matched
+    matched_slides1 = set()
     matched_slides2 = set()
     
     # Store comparison results for PDF generation
     comparisons = []
     
-    # Compare slides from dir1
+    # Match slides with the same hash, handling duplicates
     for slide1 in sorted(hashes1.keys()):
         hash1 = hashes1[slide1]
-        if hash1 in hash_to_slide2:
-            slide2 = hash_to_slide2[hash1]
-            matched_slides2.add(slide2)
-            print(f"slide {slide1} -> slide {slide2}")
-            comparisons.append(('matched', slide1, slide2))
+        
+        if hash1 in hash_to_slides2:
+            # Find an unmatched slide2 with the same hash
+            available_slides2 = [s for s in hash_to_slides2[hash1] if s not in matched_slides2]
+            
+            if available_slides2:
+                # Match with the first available slide
+                slide2 = available_slides2[0]
+                matched_slides1.add(slide1)
+                matched_slides2.add(slide2)
+                print(f"slide {slide1} -> slide {slide2}")
+                comparisons.append(('matched', slide1, slide2))
+            else:
+                # All slides with this hash in dir2 are already matched
+                print(f"slide {slide1} only in source (duplicate)")
+                comparisons.append(('source_only', slide1, None))
         else:
             print(f"slide {slide1} only in source")
             comparisons.append(('source_only', slide1, None))
     
-    # Find slides only in dir2
+    # Find slides only in dir2 (including unmatched duplicates)
     for slide2 in sorted(hashes2.keys()):
         if slide2 not in matched_slides2:
             print(f"slide {slide2} only in target")
@@ -180,6 +209,7 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
     
     if show_arrows:
         print("Drawing arrows for repositioned slides")
+        print("Slides will be shown in original file order with arrows indicating mappings")
     
     # Use landscape letter size for side-by-side comparison
     page_width, page_height = landscape(letter)
@@ -195,144 +225,281 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
     
     pages_added = 0
     
-    for comparison_type, slide1, slide2 in comparisons:
-        # Skip matched slides if suppress_common is True
-        if suppress_common and comparison_type == 'matched':
-            continue
-        # Determine which images to display
-        left_image = None
-        right_image = None
+    # If show_arrows is enabled, show slides in original order on both sides
+    if show_arrows:
+        # Build mapping from source to target
+        source_to_target = {}
+        target_to_source = {}
+        source_only = set()
+        target_only = set()
         
-        if comparison_type == 'matched':
-            left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
-            right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
-            title = f"Source Slide {slide1} = Target Slide {slide2}"
-        elif comparison_type == 'source_only':
-            left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
-            right_image = None
-            title = f"Source Slide {slide1} (not in target)"
-        elif comparison_type == 'target_only':
-            left_image = None
-            right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
-            title = f"Target Slide {slide2} (not in source)"
+        for comparison_type, slide1, slide2 in comparisons:
+            if comparison_type == 'matched':
+                source_to_target[slide1] = slide2
+                target_to_source[slide2] = slide1
+            elif comparison_type == 'source_only':
+                source_only.add(slide1)
+            elif comparison_type == 'target_only':
+                target_only.add(slide2)
         
-        # Determine color bar colors based on comparison type
-        if comparison_type == 'matched':
-            left_bar_color = HexColor('#D3D3D3')  # Light grey
-            right_bar_color = HexColor('#D3D3D3')  # Light grey
-        elif comparison_type == 'source_only':
-            left_bar_color = HexColor('#FF0000')  # Red
-            right_bar_color = None  # No bar for blank side
-        elif comparison_type == 'target_only':
-            left_bar_color = None  # No bar for blank side
-            right_bar_color = HexColor('#00FF00')  # Green
+        # Get all slides in original order
+        all_source_slides = sorted(set(source_to_target.keys()) | source_only)
+        all_target_slides = sorted(set(target_to_source.keys()) | target_only)
         
-        # Add title
-        c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(page_width / 2, page_height - 20, title)
+        # Create pages showing both sides in original order
+        max_slides = max(len(all_source_slides), len(all_target_slides))
         
-        # Draw left color bar and image
-        if left_image and os.path.exists(left_image):
-            # Draw color bar
-            if left_bar_color:
-                c.setFillColor(left_bar_color)
-                c.rect(margin, margin, bar_width, available_height, fill=1, stroke=0)
+        for i in range(max_slides):
+            slide1 = all_source_slides[i] if i < len(all_source_slides) else None
+            slide2 = all_target_slides[i] if i < len(all_target_slides) else None
             
-            img = ImageReader(left_image)
-            img_width, img_height = img.getSize()
+            # Determine what to show on this page
+            if slide1 and slide2:
+                # Both sides have slides at this position
+                if slide1 in source_only and slide2 in target_only:
+                    comparison_type = 'both_unmatched'
+                elif slide1 in source_only:
+                    comparison_type = 'mixed_source_only'
+                elif slide2 in target_only:
+                    comparison_type = 'mixed_target_only'
+                else:
+                    # Both are matched (but possibly to different slides)
+                    comparison_type = 'both_matched'
+            elif slide1:
+                comparison_type = 'source_only'
+            elif slide2:
+                comparison_type = 'target_only'
+            else:
+                continue
             
-            # Calculate scaling to fit in available space
-            scale = min(available_width / img_width, available_height / img_height)
-            scaled_width = img_width * scale
-            scaled_height = img_height * scale
+            # Skip if suppress_common and both match at same position
+            if suppress_common and comparison_type == 'both_matched':
+                if slide1 in source_to_target and source_to_target[slide1] == slide2:
+                    continue
             
-            # Center the image in the left half (after the bar)
-            x = margin + bar_width + (available_width - scaled_width) / 2
-            y = margin + (available_height - scaled_height) / 2
+            # Calculate arrow information for cross-page arrows
+            arrow_info = None
+            if slide1 and slide1 in source_to_target:
+                target_slide = source_to_target[slide1]
+                target_page = all_target_slides.index(target_slide) + 1 if target_slide in all_target_slides else None
+                current_page = i + 1
+                if target_page and target_page != current_page:
+                    arrow_info = {
+                        'source_slide': slide1,
+                        'target_slide': target_slide,
+                        'target_page': target_page,
+                        'current_page': current_page,
+                        'direction': 'up' if target_page < current_page else 'down'
+                    }
             
-            c.drawImage(left_image, x, y, width=scaled_width, height=scaled_height)
+            # Process this page
+            _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, slide2,
+                                               page_width, page_height, margin, bar_width,
+                                               available_width, available_height,
+                                               arrow_info, source_to_target, target_to_source)
+            pages_added += 1
+    else:
+        # Original behavior: iterate through comparisons as-is (no arrows)
+        for comparison_type, slide1, slide2 in comparisons:
+            # Skip matched slides if suppress_common is True
+            if suppress_common and comparison_type == 'matched':
+                continue
             
-            # Add label
-            c.setFillColorRGB(0, 0, 0)  # Reset to black
-            c.setFont("Helvetica", 10)
-            c.drawString(margin + bar_width, margin - 15, f"Source: slide_{slide1:03d}.png")
-        
-        # Draw right color bar and image
-        if right_image and os.path.exists(right_image):
-            # Draw color bar
-            if right_bar_color:
-                c.setFillColor(right_bar_color)
-                right_bar_x = page_width / 2 + margin
-                c.rect(right_bar_x, margin, bar_width, available_height, fill=1, stroke=0)
+            # Build simple mapping for non-arrow mode
+            source_to_target = {}
+            target_to_source = {}
+            for ct, s1, s2 in comparisons:
+                if ct == 'matched':
+                    source_to_target[s1] = s2
+                    target_to_source[s2] = s1
             
-            img = ImageReader(right_image)
-            img_width, img_height = img.getSize()
-            
-            # Calculate scaling to fit in available space
-            scale = min(available_width / img_width, available_height / img_height)
-            scaled_width = img_width * scale
-            scaled_height = img_height * scale
-            
-            # Center the image in the right half (after the bar)
-            x = page_width / 2 + margin + bar_width + (available_width - scaled_width) / 2
-            y = margin + (available_height - scaled_height) / 2
-            
-            c.drawImage(right_image, x, y, width=scaled_width, height=scaled_height)
-            
-            # Add label
-            c.setFillColorRGB(0, 0, 0)  # Reset to black
-            c.setFont("Helvetica", 10)
-            c.drawString(page_width / 2 + margin + bar_width, margin - 15, f"Target: slide_{slide2:03d}.png")
-        
-        # Draw center divider line
-        c.setStrokeColorRGB(0.7, 0.7, 0.7)
-        c.setLineWidth(1)
-        c.line(page_width / 2, margin, page_width / 2, page_height - margin)
-        
-        # Draw arrow if slides are repositioned (different slide numbers) and show_arrows is enabled
-        if show_arrows and comparison_type == 'matched' and slide1 != slide2:
-            # Arrow from right edge of left image to left edge of right image
-            arrow_start_x = page_width / 2 - margin / 2
-            arrow_end_x = page_width / 2 + margin / 2
-            arrow_y = page_height / 2
-            
-            # Draw arrow line
-            c.setStrokeColorRGB(0.2, 0.2, 0.8)  # Blue arrow
-            c.setLineWidth(2)
-            c.line(arrow_start_x, arrow_y, arrow_end_x, arrow_y)
-            
-            # Draw arrowhead using path
-            arrow_size = 10
-            c.setFillColorRGB(0.2, 0.2, 0.8)
-            c.setStrokeColorRGB(0.2, 0.2, 0.8)
-            
-            # Right-pointing arrowhead using path object
-            from reportlab.graphics.shapes import Path
-            from reportlab.graphics import renderPDF
-            from reportlab.graphics.shapes import Drawing, Polygon
-            
-            # Create arrowhead as a filled polygon
-            p = c.beginPath()
-            p.moveTo(arrow_end_x, arrow_y)
-            p.lineTo(arrow_end_x - arrow_size, arrow_y - arrow_size/2)
-            p.lineTo(arrow_end_x - arrow_size, arrow_y + arrow_size/2)
-            p.close()
-            c.drawPath(p, fill=1, stroke=0)
-            
-            # Add text label showing the slide number change
-            c.setFillColorRGB(0.2, 0.2, 0.8)
-            c.setFont("Helvetica-Bold", 10)
-            label_text = f"{slide1} → {slide2}"
-            text_width = c.stringWidth(label_text, "Helvetica-Bold", 10)
-            c.drawString(page_width / 2 - text_width / 2, arrow_y + 15, label_text)
-        
-        c.showPage()
-        pages_added += 1
+            _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, slide2,
+                                               page_width, page_height, margin, bar_width,
+                                               available_width, available_height,
+                                               None, source_to_target, target_to_source)
+            pages_added += 1
     
     c.save()
     print(f"PDF saved to: {output_path}")
     print(f"Total pages: {pages_added}")
     print("="*60)
+
+
+def _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, slide2,
+                                        page_width, page_height, margin, bar_width,
+                                        available_width, available_height,
+                                        arrow_info, source_to_target, target_to_source):
+    """Helper function to render a single comparison page with cross-page arrow support"""
+    
+    # Determine which images to display
+    left_image = None
+    right_image = None
+    title = ""
+    
+    # Build title and determine images based on what's on this page
+    if comparison_type == 'both_matched':
+        left_image = os.path.join(dir1, f"slide_{slide1:03d}.png") if slide1 else None
+        right_image = os.path.join(dir2, f"slide_{slide2:03d}.png") if slide2 else None
+        # Check if they match each other
+        if slide1 in source_to_target and source_to_target[slide1] == slide2:
+            title = f"Source Slide {slide1} = Target Slide {slide2}"
+        else:
+            # They're both matched but to different slides
+            target_match = source_to_target.get(slide1, '?')
+            source_match = target_to_source.get(slide2, '?')
+            title = f"Source {slide1} (→{target_match}) | Target {slide2} (←{source_match})"
+    elif comparison_type == 'mixed_source_only':
+        left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
+        right_image = os.path.join(dir2, f"slide_{slide2:03d}.png") if slide2 else None
+        source_match = target_to_source.get(slide2, '?') if slide2 else '?'
+        title = f"Source {slide1} (not in target) | Target {slide2} (←{source_match})"
+    elif comparison_type == 'mixed_target_only':
+        left_image = os.path.join(dir1, f"slide_{slide1:03d}.png") if slide1 else None
+        right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
+        target_match = source_to_target.get(slide1, '?') if slide1 else '?'
+        title = f"Source {slide1} (→{target_match}) | Target {slide2} (not in source)"
+    elif comparison_type == 'source_only':
+        left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
+        right_image = None
+        title = f"Source Slide {slide1} (not in target)"
+    elif comparison_type == 'target_only':
+        left_image = None
+        right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
+        title = f"Target Slide {slide2} (not in source)"
+    elif comparison_type == 'both_unmatched':
+        left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
+        right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
+        title = f"Source {slide1} (not in target) | Target {slide2} (not in source)"
+    else:
+        left_image = None
+        right_image = None
+        title = "Unknown comparison type"
+    
+    # Determine color bar colors
+    left_bar_color = None
+    right_bar_color = None
+    
+    if slide1:
+        if slide1 in source_to_target:
+            left_bar_color = HexColor('#D3D3D3')  # Grey - matched
+        else:
+            left_bar_color = HexColor('#FF0000')  # Red - not in target
+    
+    if slide2:
+        if slide2 in target_to_source:
+            right_bar_color = HexColor('#D3D3D3')  # Grey - matched
+        else:
+            right_bar_color = HexColor('#00FF00')  # Green - not in source
+    
+    # Add title
+    c.setFont("Helvetica-Bold", 14)
+    c.drawCentredString(page_width / 2, page_height - 20, title)
+    
+    # Draw left color bar and image
+    if left_image and os.path.exists(left_image):
+        # Draw color bar
+        if left_bar_color:
+            c.setFillColor(left_bar_color)
+            c.rect(margin, margin, bar_width, available_height, fill=1, stroke=0)
+        
+        img = ImageReader(left_image)
+        img_width, img_height = img.getSize()
+        
+        # Calculate scaling to fit in available space
+        scale = min(available_width / img_width, available_height / img_height)
+        scaled_width = img_width * scale
+        scaled_height = img_height * scale
+        
+        # Center the image in the left half (after the bar)
+        x = margin + bar_width + (available_width - scaled_width) / 2
+        y = margin + (available_height - scaled_height) / 2
+        
+        c.drawImage(left_image, x, y, width=scaled_width, height=scaled_height)
+        
+        # Add label
+        c.setFillColorRGB(0, 0, 0)  # Reset to black
+        c.setFont("Helvetica", 10)
+        c.drawString(margin + bar_width, margin - 15, f"Source: slide_{slide1:03d}.png")
+    
+    # Draw right color bar and image
+    if right_image and os.path.exists(right_image):
+        # Draw color bar
+        if right_bar_color:
+            c.setFillColor(right_bar_color)
+            right_bar_x = page_width / 2 + margin
+            c.rect(right_bar_x, margin, bar_width, available_height, fill=1, stroke=0)
+        
+        img = ImageReader(right_image)
+        img_width, img_height = img.getSize()
+        
+        # Calculate scaling to fit in available space
+        scale = min(available_width / img_width, available_height / img_height)
+        scaled_width = img_width * scale
+        scaled_height = img_height * scale
+        
+        # Center the image in the right half (after the bar)
+        x = page_width / 2 + margin + bar_width + (available_width - scaled_width) / 2
+        y = margin + (available_height - scaled_height) / 2
+        
+        c.drawImage(right_image, x, y, width=scaled_width, height=scaled_height)
+        
+        # Add label
+        c.setFillColorRGB(0, 0, 0)  # Reset to black
+        c.setFont("Helvetica", 10)
+        c.drawString(page_width / 2 + margin + bar_width, margin - 15, f"Target: slide_{slide2:03d}.png")
+    
+    # Draw center divider line
+    c.setStrokeColorRGB(0.7, 0.7, 0.7)
+    c.setLineWidth(1)
+    c.line(page_width / 2, margin, page_width / 2, page_height - margin)
+    
+    # Draw cross-page arrow indicator if needed
+    if arrow_info:
+        # Draw indicator showing this source maps to a different page
+        arrow_start_x = page_width / 2 - margin / 2
+        arrow_y = page_height / 2
+        
+        # Draw arrow pointing up or down
+        c.setStrokeColorRGB(0.2, 0.2, 0.8)  # Blue
+        c.setLineWidth(3)
+        c.setFillColorRGB(0.2, 0.2, 0.8)
+        
+        if arrow_info['direction'] == 'up':
+            # Draw upward arrow
+            arrow_top_y = margin + available_height - 20
+            c.line(arrow_start_x, arrow_y, arrow_start_x, arrow_top_y)
+            
+            # Arrowhead pointing up
+            p = c.beginPath()
+            p.moveTo(arrow_start_x, arrow_top_y)
+            p.lineTo(arrow_start_x - 8, arrow_top_y - 12)
+            p.lineTo(arrow_start_x + 8, arrow_top_y - 12)
+            p.close()
+            c.drawPath(p, fill=1, stroke=0)
+            
+            # Label
+            c.setFont("Helvetica-Bold", 10)
+            label_text = f"→ Page {arrow_info['target_page']}"
+            c.drawString(arrow_start_x + 15, arrow_top_y - 10, label_text)
+        else:
+            # Draw downward arrow
+            arrow_bottom_y = margin + 20
+            c.line(arrow_start_x, arrow_y, arrow_start_x, arrow_bottom_y)
+            
+            # Arrowhead pointing down
+            p = c.beginPath()
+            p.moveTo(arrow_start_x, arrow_bottom_y)
+            p.lineTo(arrow_start_x - 8, arrow_bottom_y + 12)
+            p.lineTo(arrow_start_x + 8, arrow_bottom_y + 12)
+            p.close()
+            c.drawPath(p, fill=1, stroke=0)
+            
+            # Label
+            c.setFont("Helvetica-Bold", 10)
+            label_text = f"→ Page {arrow_info['target_page']}"
+            c.drawString(arrow_start_x + 15, arrow_bottom_y + 5, label_text)
+    
+    c.showPage()
 
 
 def process_powerpoint(ppt_path, base_temp_dir):
