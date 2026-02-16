@@ -196,7 +196,7 @@ def compare_slides(dir1, dir2):
     return comparisons, hashes1, hashes2
 
 
-def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True, show_arrows=False):
+def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True, show_moved_pages=True):
     """Generate a PDF with side-by-side slide comparisons"""
     print("\n" + "="*60)
     print("GENERATING COMPARISON PDF")
@@ -207,8 +207,8 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
     else:
         print("Including all slides (matched slides will be shown)")
     
-    if show_arrows:
-        print("Drawing arrows for repositioned slides")
+    if show_moved_pages:
+        print("Showing moved pages with arrows for repositioned slides")
         print("Slides will be shown in original file order with arrows indicating mappings")
     
     # Use landscape letter size for side-by-side comparison
@@ -225,8 +225,8 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
     
     pages_added = 0
     
-    # If show_arrows is enabled, show slides in original order on both sides
-    if show_arrows:
+    # If show_moved_pages is enabled, show slides in original order on both sides
+    if show_moved_pages:
         # Build mapping from source to target
         source_to_target = {}
         target_to_source = {}
@@ -351,21 +351,43 @@ def _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, 
     elif comparison_type == 'mixed_source_only':
         left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
         right_image = os.path.join(dir2, f"slide_{slide2:03d}.png") if slide2 else None
-        source_match = target_to_source.get(slide2, '?') if slide2 else '?'
-        title = f"Source {slide1} (not in target) | Target {slide2} (←{source_match})"
+        # Check if source is actually matched to a different position
+        if slide1 in source_to_target:
+            target_match = source_to_target[slide1]
+            source_match = target_to_source.get(slide2, '?') if slide2 else '?'
+            title = f"Source {slide1} (→{target_match}) | Target {slide2} (←{source_match})"
+        else:
+            source_match = target_to_source.get(slide2, '?') if slide2 else '?'
+            title = f"Source {slide1} (not in target) | Target {slide2} (←{source_match})"
     elif comparison_type == 'mixed_target_only':
         left_image = os.path.join(dir1, f"slide_{slide1:03d}.png") if slide1 else None
         right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
-        target_match = source_to_target.get(slide1, '?') if slide1 else '?'
-        title = f"Source {slide1} (→{target_match}) | Target {slide2} (not in source)"
+        # Check if target is actually matched to a different position
+        if slide2 in target_to_source:
+            source_match = target_to_source[slide2]
+            target_match = source_to_target.get(slide1, '?') if slide1 else '?'
+            title = f"Source {slide1} (→{target_match}) | Target {slide2} (←{source_match})"
+        else:
+            target_match = source_to_target.get(slide1, '?') if slide1 else '?'
+            title = f"Source {slide1} (→{target_match}) | Target {slide2} (not in source)"
     elif comparison_type == 'source_only':
         left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
         right_image = None
-        title = f"Source Slide {slide1} (not in target)"
+        # Check if this source slide is actually matched to a target
+        if slide1 in source_to_target:
+            target_match = source_to_target[slide1]
+            title = f"Source Slide {slide1} (→ Target {target_match})"
+        else:
+            title = f"Source Slide {slide1} (not in target)"
     elif comparison_type == 'target_only':
         left_image = None
         right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
-        title = f"Target Slide {slide2} (not in source)"
+        # Check if this target slide is actually matched to a source
+        if slide2 in target_to_source:
+            source_match = target_to_source[slide2]
+            title = f"Target Slide {slide2} (← Source {source_match})"
+        else:
+            title = f"Target Slide {slide2} (not in source)"
     elif comparison_type == 'both_unmatched':
         left_image = os.path.join(dir1, f"slide_{slide1:03d}.png")
         right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
@@ -562,9 +584,13 @@ Color Coding:
                                action='store_false',
                                help='Show all slides including common ones')
     
-    parser.add_argument('--show-arrows', dest='show_arrows',
-                       action='store_true', default=False,
-                       help='Draw arrows between source and target for repositioned slides')
+    moved_pages_group = parser.add_mutually_exclusive_group()
+    moved_pages_group.add_argument('--show-moved-pages', dest='show_moved_pages',
+                                  action='store_true', default=True,
+                                  help='Show slides in original order with arrows for repositioned slides (default)')
+    moved_pages_group.add_argument('--no-show-moved-pages', dest='show_moved_pages',
+                                  action='store_false',
+                                  help='Show slides grouped by match status without arrows')
     
     args = parser.parse_args()
     
@@ -572,7 +598,7 @@ Color Coding:
     file2 = args.file2
     output_dir = args.output_dir
     suppress_common = args.suppress_common
-    show_arrows = args.show_arrows
+    show_moved_pages = args.show_moved_pages
     
     # Determine if we should use temporary directory and clean up
     use_temp_dir = output_dir is None
@@ -615,7 +641,7 @@ Color Coding:
         
         # Generate comparison PDF
         pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
-        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_arrows)
+        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_moved_pages)
         
         print(f"\nComparison PDF: {pdf_path}")
         
