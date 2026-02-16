@@ -561,6 +561,47 @@ def process_powerpoint(ppt_path, base_temp_dir, debug=False):
         raise
 
 
+def get_git_committed_version(file_path, temp_dir):
+    """Get the last committed version of a file from git"""
+    try:
+        # Convert to absolute path
+        abs_file_path = os.path.abspath(file_path)
+        
+        # Get the git repository root
+        git_root_result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            check=True,
+            text=True,
+            cwd=os.path.dirname(abs_file_path)
+        )
+        git_root = git_root_result.stdout.strip()
+        
+        # Get relative path from git root
+        rel_path = os.path.relpath(abs_file_path, git_root)
+        
+        # Get the file content from the last commit
+        result = subprocess.run(
+            ['git', 'show', f'HEAD:{rel_path}'],
+            capture_output=True,
+            check=True,
+            cwd=git_root
+        )
+        
+        # Create a temporary file with the committed version
+        file_name = Path(file_path).name
+        base_name = Path(file_path).stem
+        extension = Path(file_path).suffix
+        
+        committed_file = os.path.join(temp_dir, f"{base_name}_committed{extension}")
+        with open(committed_file, 'wb') as f:
+            f.write(result.stdout)
+        
+        return committed_file
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to get committed version of {file_path}: {e.stderr.decode()}")
+
+
 def main():
     """Main function to compare two PowerPoint files"""
     
@@ -569,8 +610,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Use temporary directory with common slides suppressed (default)
+  # Compare two files
   python ppt_compare.py file1.pptx file2.pptx
+  
+  # Compare current file with last committed version
+  python ppt_compare.py presentation.pptx --git
   
   # Show all slides including common ones
   python ppt_compare.py file1.pptx file2.pptx --no-suppress-common-slides
@@ -585,8 +629,8 @@ Color Coding:
         '''
     )
     
-    parser.add_argument('file1', help='First PowerPoint file (source)')
-    parser.add_argument('file2', help='Second PowerPoint file (target)')
+    parser.add_argument('file1', help='First PowerPoint file (source), or the only file when using --git')
+    parser.add_argument('file2', nargs='?', default=None, help='Second PowerPoint file (target), not used with --git')
     parser.add_argument('output_dir', nargs='?', default=None,
                        help='Optional output directory (uses temp dir if not specified)')
     
@@ -609,6 +653,9 @@ Color Coding:
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output showing detailed processing information')
     
+    parser.add_argument('--git', action='store_true', default=False,
+                       help='Compare current file with last committed version (only file1 is used)')
+    
     args = parser.parse_args()
     
     file1 = args.file1
@@ -617,18 +664,51 @@ Color Coding:
     suppress_common = args.suppress_common
     show_moved_pages = args.show_moved_pages
     debug = args.debug
+    use_git = args.git
+    
+    # Validate git mode usage
+    if use_git:
+        if file2 is not None and file2 != output_dir:
+            print("Error: When using --git, only specify one file")
+            print("Usage: python ppt_compare.py file.pptx --git [output_dir]")
+            sys.exit(1)
+        # In git mode, file2 becomes output_dir if provided
+        if file2 is not None:
+            output_dir = file2
+            file2 = None
     
     # Determine if we should use temporary directory and clean up
     use_temp_dir = output_dir is None
     
-    # Validate files exist
+    # Validate file1 exists
     if not os.path.exists(file1):
         print(f"Error: File not found: {file1}")
         sys.exit(1)
     
-    if not os.path.exists(file2):
-        print(f"Error: File not found: {file2}")
-        sys.exit(1)
+    # Handle git mode or regular mode
+    if use_git:
+        # Create temporary directory for git committed version
+        git_temp_dir = tempfile.mkdtemp(prefix="ppt_git_")
+        try:
+            if debug:
+                print(f"Getting committed version of {file1} from git...")
+            file2 = get_git_committed_version(file1, git_temp_dir)
+            if debug:
+                print(f"Committed version saved to: {file2}")
+        except Exception as e:
+            print(f"Error: {e}")
+            shutil.rmtree(git_temp_dir)
+            sys.exit(1)
+    else:
+        # Regular mode - validate file2 exists
+        if file2 is None:
+            print("Error: Second file required when not using --git")
+            print("Usage: python ppt_compare.py file1.pptx file2.pptx [output_dir]")
+            print("   or: python ppt_compare.py file.pptx --git [output_dir]")
+            sys.exit(1)
+        if not os.path.exists(file2):
+            print(f"Error: File not found: {file2}")
+            sys.exit(1)
     
     # Create or use output directory
     if use_temp_dir:
@@ -664,23 +744,32 @@ Color Coding:
         pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
         generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_moved_pages, debug)
         
-        print(f"\nComparison PDF: {pdf_path}")
+        # Check if PDF has content (file size > 1KB indicates it has pages)
+        pdf_has_content = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1024
         
-        # Open the PDF
-        if debug:
-            print("\nOpening PDF...")
-        try:
-            if sys.platform == 'darwin':  # macOS
-                subprocess.run(['open', pdf_path], check=True)
-            elif sys.platform == 'win32':  # Windows
-                os.startfile(pdf_path)
-            else:  # Linux
-                subprocess.run(['xdg-open', pdf_path], check=True)
+        if pdf_has_content:
+            print(f"\nComparison PDF: {pdf_path}")
+            
+            # Open the PDF
             if debug:
-                print("PDF opened successfully")
-        except Exception as e:
-            print(f"Could not open PDF automatically: {e}")
-            print(f"Please open manually: {pdf_path}")
+                print("\nOpening PDF...")
+            try:
+                if sys.platform == 'darwin':  # macOS
+                    subprocess.run(['open', pdf_path], check=True)
+                elif sys.platform == 'win32':  # Windows
+                    os.startfile(pdf_path)
+                else:  # Linux
+                    subprocess.run(['xdg-open', pdf_path], check=True)
+                if debug:
+                    print("PDF opened successfully")
+            except Exception as e:
+                print(f"Could not open PDF automatically: {e}")
+                print(f"Please open manually: {pdf_path}")
+        else:
+            print(f"\nNo differences found between the presentations.")
+            print(f"All slides are identical (comparison PDF not generated).")
+            if suppress_common:
+                print(f"Tip: Use --no-suppress-common-slides to see all slides in the comparison.")
         
         # If using temporary directory, wait for user to view PDF then clean up
         if use_temp_dir:
@@ -690,10 +779,24 @@ Color Coding:
             shutil.rmtree(base_temp_dir)
             if debug:
                 print("Temporary files deleted.")
+            
+            # Clean up git temporary directory if used (after main temp dir cleanup)
+            if use_git:
+                if debug:
+                    print("Cleaning up git temporary files...")
+                shutil.rmtree(git_temp_dir)
+        else:
+            # If not using temp dir, still need to clean up git temp dir immediately
+            if use_git:
+                if debug:
+                    print("Cleaning up git temporary files...")
+                shutil.rmtree(git_temp_dir)
         
     except Exception as e:
         print(f"\nError during processing: {e}")
         print(f"\nTemporary directory (may contain partial results): {base_temp_dir}")
+        if use_git and 'git_temp_dir' in locals():
+            shutil.rmtree(git_temp_dir)
         sys.exit(1)
 
 
