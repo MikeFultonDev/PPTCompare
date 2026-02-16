@@ -10,10 +10,12 @@ import tempfile
 import hashlib
 import shutil
 import subprocess
+import argparse
 from pathlib import Path
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
+from reportlab.lib.colors import HexColor
 
 try:
     from pptx import Presentation
@@ -165,11 +167,16 @@ def compare_slides(dir1, dir2):
     return comparisons, hashes1, hashes2
 
 
-def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
+def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True):
     """Generate a PDF with side-by-side slide comparisons"""
     print("\n" + "="*60)
     print("GENERATING COMPARISON PDF")
     print("="*60)
+    
+    if suppress_common:
+        print("Suppressing common slides (matched slides will be excluded)")
+    else:
+        print("Including all slides (matched slides will be shown)")
     
     # Use landscape letter size for side-by-side comparison
     page_width, page_height = landscape(letter)
@@ -179,10 +186,16 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
     
     # Calculate dimensions for side-by-side layout
     margin = 36  # 0.5 inch margins
-    available_width = (page_width - 3 * margin) / 2  # Space for two images with center margin
+    bar_width = 10  # Width of color bar
+    available_width = (page_width - 3 * margin - 2 * bar_width) / 2  # Space for two images with bars
     available_height = page_height - 2 * margin
     
+    pages_added = 0
+    
     for comparison_type, slide1, slide2 in comparisons:
+        # Skip matched slides if suppress_common is True
+        if suppress_common and comparison_type == 'matched':
+            continue
         # Determine which images to display
         left_image = None
         right_image = None
@@ -200,12 +213,28 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
             right_image = os.path.join(dir2, f"slide_{slide2:03d}.png")
             title = f"Target Slide {slide2} (not in source)"
         
+        # Determine color bar colors based on comparison type
+        if comparison_type == 'matched':
+            left_bar_color = HexColor('#D3D3D3')  # Light grey
+            right_bar_color = HexColor('#D3D3D3')  # Light grey
+        elif comparison_type == 'source_only':
+            left_bar_color = HexColor('#FF0000')  # Red
+            right_bar_color = None  # No bar for blank side
+        elif comparison_type == 'target_only':
+            left_bar_color = None  # No bar for blank side
+            right_bar_color = HexColor('#00FF00')  # Green
+        
         # Add title
         c.setFont("Helvetica-Bold", 14)
         c.drawCentredString(page_width / 2, page_height - 20, title)
         
-        # Draw left image
+        # Draw left color bar and image
         if left_image and os.path.exists(left_image):
+            # Draw color bar
+            if left_bar_color:
+                c.setFillColor(left_bar_color)
+                c.rect(margin, margin, bar_width, available_height, fill=1, stroke=0)
+            
             img = ImageReader(left_image)
             img_width, img_height = img.getSize()
             
@@ -214,18 +243,25 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
             scaled_width = img_width * scale
             scaled_height = img_height * scale
             
-            # Center the image in the left half
-            x = margin + (available_width - scaled_width) / 2
+            # Center the image in the left half (after the bar)
+            x = margin + bar_width + (available_width - scaled_width) / 2
             y = margin + (available_height - scaled_height) / 2
             
             c.drawImage(left_image, x, y, width=scaled_width, height=scaled_height)
             
             # Add label
+            c.setFillColorRGB(0, 0, 0)  # Reset to black
             c.setFont("Helvetica", 10)
-            c.drawString(margin, margin - 15, f"Source: slide_{slide1:03d}.png")
+            c.drawString(margin + bar_width, margin - 15, f"Source: slide_{slide1:03d}.png")
         
-        # Draw right image
+        # Draw right color bar and image
         if right_image and os.path.exists(right_image):
+            # Draw color bar
+            if right_bar_color:
+                c.setFillColor(right_bar_color)
+                right_bar_x = page_width / 2 + margin
+                c.rect(right_bar_x, margin, bar_width, available_height, fill=1, stroke=0)
+            
             img = ImageReader(right_image)
             img_width, img_height = img.getSize()
             
@@ -234,15 +270,16 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
             scaled_width = img_width * scale
             scaled_height = img_height * scale
             
-            # Center the image in the right half
-            x = page_width / 2 + margin + (available_width - scaled_width) / 2
+            # Center the image in the right half (after the bar)
+            x = page_width / 2 + margin + bar_width + (available_width - scaled_width) / 2
             y = margin + (available_height - scaled_height) / 2
             
             c.drawImage(right_image, x, y, width=scaled_width, height=scaled_height)
             
             # Add label
+            c.setFillColorRGB(0, 0, 0)  # Reset to black
             c.setFont("Helvetica", 10)
-            c.drawString(page_width / 2 + margin, margin - 15, f"Target: slide_{slide2:03d}.png")
+            c.drawString(page_width / 2 + margin + bar_width, margin - 15, f"Target: slide_{slide2:03d}.png")
         
         # Draw center divider line
         c.setStrokeColorRGB(0.7, 0.7, 0.7)
@@ -250,9 +287,11 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons):
         c.line(page_width / 2, margin, page_width / 2, page_height - margin)
         
         c.showPage()
+        pages_added += 1
     
     c.save()
     print(f"PDF saved to: {output_path}")
+    print(f"Total pages: {pages_added}")
     print("="*60)
 
 
@@ -282,18 +321,46 @@ def process_powerpoint(ppt_path, base_temp_dir):
 def main():
     """Main function to compare two PowerPoint files"""
     
-    if len(sys.argv) < 3 or len(sys.argv) > 4:
-        print("Usage: python ppt_compare.py <file1.pptx> <file2.pptx> [output_dir]")
-        print("\nArguments:")
-        print("  file1.pptx   - First PowerPoint file (source)")
-        print("  file2.pptx   - Second PowerPoint file (target)")
-        print("  output_dir   - Optional output directory for results")
-        print("                 If not specified, uses temporary directory and cleans up after displaying PDF")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Compare two PowerPoint presentations and generate a side-by-side comparison PDF',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Use temporary directory with common slides suppressed (default)
+  python ppt_compare.py file1.pptx file2.pptx
+  
+  # Show all slides including common ones
+  python ppt_compare.py file1.pptx file2.pptx --no-suppress-common-slides
+  
+  # Save to specific directory
+  python ppt_compare.py file1.pptx file2.pptx ./output
+  
+Color Coding:
+  - Light grey bar: Slide present in both presentations (matched)
+  - Red bar: Slide only in source presentation
+  - Green bar: Slide only in target presentation
+        '''
+    )
     
-    file1 = sys.argv[1]
-    file2 = sys.argv[2]
-    output_dir = sys.argv[3] if len(sys.argv) == 4 else None
+    parser.add_argument('file1', help='First PowerPoint file (source)')
+    parser.add_argument('file2', help='Second PowerPoint file (target)')
+    parser.add_argument('output_dir', nargs='?', default=None,
+                       help='Optional output directory (uses temp dir if not specified)')
+    
+    suppress_group = parser.add_mutually_exclusive_group()
+    suppress_group.add_argument('--suppress-common-slides', dest='suppress_common',
+                               action='store_true', default=True,
+                               help='Suppress slides present in both presentations (default)')
+    suppress_group.add_argument('--no-suppress-common-slides', dest='suppress_common',
+                               action='store_false',
+                               help='Show all slides including common ones')
+    
+    args = parser.parse_args()
+    
+    file1 = args.file1
+    file2 = args.file2
+    output_dir = args.output_dir
+    suppress_common = args.suppress_common
     
     # Determine if we should use temporary directory and clean up
     use_temp_dir = output_dir is None
@@ -336,7 +403,7 @@ def main():
         
         # Generate comparison PDF
         pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
-        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons)
+        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common)
         
         print(f"\nComparison PDF: {pdf_path}")
         
