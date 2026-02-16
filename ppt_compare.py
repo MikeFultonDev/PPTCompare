@@ -40,11 +40,12 @@ def compute_sha256(file_path):
     return sha256_hash.hexdigest()
 
 
-def convert_ppt_to_images_libreoffice(ppt_path, output_dir):
+def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False):
     """Convert PowerPoint to images using LibreOffice (cross-platform)"""
     import subprocess
     
-    print(f"  Converting {Path(ppt_path).name} to PDF...")
+    if debug:
+        print(f"  Converting {Path(ppt_path).name} to PDF...")
     
     # First convert to PDF
     ppt_name = Path(ppt_path).stem
@@ -77,13 +78,15 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir):
         raise RuntimeError("PDF conversion failed")
     
     temp_pdf = str(pdf_files[0])
-    print(f"  PDF created: {temp_pdf}")
+    if debug:
+        print(f"  PDF created: {temp_pdf}")
     
     # Convert PDF to images
     if not PDF2IMAGE_AVAILABLE:
         raise RuntimeError("pdf2image not installed. Run: pip install pdf2image poppler-utils")
     
-    print(f"  Converting PDF to PNG images...")
+    if debug:
+        print(f"  Converting PDF to PNG images...")
     images = convert_from_path(temp_pdf, dpi=150)
     
     for i, image in enumerate(images, start=1):
@@ -96,8 +99,9 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir):
         with open(hash_file, 'w') as f:
             f.write(f"{sha256_hash}  {os.path.basename(output_path)}\n")
         
-        print(f"    Slide {i} -> {output_path}")
-        print(f"             SHA-256: {sha256_hash}")
+        if debug:
+            print(f"    Slide {i} -> {output_path}")
+            print(f"             SHA-256: {sha256_hash}")
     
     # Clean up temporary PDF
     if os.path.exists(temp_pdf):
@@ -123,12 +127,13 @@ def load_slide_hashes(output_dir):
     return hashes
 
 
-def compare_slides(dir1, dir2):
+def compare_slides(dir1, dir2, debug=False):
     """Compare slides between two directories and create a mapping.
     Handles duplicate slides (same hash) correctly by tracking counts."""
-    print("\n" + "="*60)
-    print("SLIDE COMPARISON")
-    print("="*60)
+    if debug:
+        print("\n" + "="*60)
+        print("SLIDE COMPARISON")
+        print("="*60)
     
     hashes1 = load_slide_hashes(dir1)
     hashes2 = load_slide_hashes(dir2)
@@ -175,41 +180,47 @@ def compare_slides(dir1, dir2):
                 slide2 = available_slides2[0]
                 matched_slides1.add(slide1)
                 matched_slides2.add(slide2)
-                print(f"slide {slide1} -> slide {slide2}")
+                if debug:
+                    print(f"slide {slide1} -> slide {slide2}")
                 comparisons.append(('matched', slide1, slide2))
             else:
                 # All slides with this hash in dir2 are already matched
-                print(f"slide {slide1} only in source (duplicate)")
+                if debug:
+                    print(f"slide {slide1} only in source (duplicate)")
                 comparisons.append(('source_only', slide1, None))
         else:
-            print(f"slide {slide1} only in source")
+            if debug:
+                print(f"slide {slide1} only in source")
             comparisons.append(('source_only', slide1, None))
     
     # Find slides only in dir2 (including unmatched duplicates)
     for slide2 in sorted(hashes2.keys()):
         if slide2 not in matched_slides2:
-            print(f"slide {slide2} only in target")
+            if debug:
+                print(f"slide {slide2} only in target")
             comparisons.append(('target_only', None, slide2))
     
-    print("="*60)
+    if debug:
+        print("="*60)
     
     return comparisons, hashes1, hashes2
 
 
-def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True, show_moved_pages=True):
+def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True, show_moved_pages=True, debug=False):
     """Generate a PDF with side-by-side slide comparisons"""
-    print("\n" + "="*60)
-    print("GENERATING COMPARISON PDF")
-    print("="*60)
-    
-    if suppress_common:
-        print("Suppressing common slides (matched slides will be excluded)")
-    else:
-        print("Including all slides (matched slides will be shown)")
-    
-    if show_moved_pages:
-        print("Showing moved pages with arrows for repositioned slides")
-        print("Slides will be shown in original file order with arrows indicating mappings")
+    if debug:
+        print("\n" + "="*60)
+        print("GENERATING COMPARISON PDF")
+        print("="*60)
+        
+        if suppress_common:
+            print("Suppressing common slides (matched slides will be excluded)")
+        else:
+            print("Including all slides (matched slides will be shown)")
+        
+        if show_moved_pages:
+            print("Showing moved pages with arrows for repositioned slides")
+            print("Slides will be shown in original file order with arrows indicating mappings")
     
     # Use landscape letter size for side-by-side comparison
     page_width, page_height = landscape(letter)
@@ -320,9 +331,10 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
             pages_added += 1
     
     c.save()
-    print(f"PDF saved to: {output_path}")
-    print(f"Total pages: {pages_added}")
-    print("="*60)
+    if debug:
+        print(f"PDF saved to: {output_path}")
+        print(f"Total pages: {pages_added}")
+        print("="*60)
 
 
 def _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, slide2,
@@ -524,7 +536,7 @@ def _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, 
     c.showPage()
 
 
-def process_powerpoint(ppt_path, base_temp_dir):
+def process_powerpoint(ppt_path, base_temp_dir, debug=False):
     """Process a single PowerPoint file and convert slides to PNG images"""
     
     if not os.path.exists(ppt_path):
@@ -535,12 +547,14 @@ def process_powerpoint(ppt_path, base_temp_dir):
     output_dir = os.path.join(base_temp_dir, ppt_name)
     os.makedirs(output_dir, exist_ok=True)
     
-    print(f"\nProcessing: {ppt_path}")
-    print(f"Output directory: {output_dir}")
+    if debug:
+        print(f"\nProcessing: {ppt_path}")
+        print(f"Output directory: {output_dir}")
     
     try:
-        slide_count = convert_ppt_to_images_libreoffice(ppt_path, output_dir)
-        print(f"  Successfully converted {slide_count} slides")
+        slide_count = convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug)
+        if debug:
+            print(f"  Successfully converted {slide_count} slides")
         return output_dir
     except Exception as e:
         print(f"  Error: {e}")
@@ -592,6 +606,9 @@ Color Coding:
                                   action='store_false',
                                   help='Show slides grouped by match status without arrows')
     
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable debug output showing detailed processing information')
+    
     args = parser.parse_args()
     
     file1 = args.file1
@@ -599,6 +616,7 @@ Color Coding:
     output_dir = args.output_dir
     suppress_common = args.suppress_common
     show_moved_pages = args.show_moved_pages
+    debug = args.debug
     
     # Determine if we should use temporary directory and clean up
     use_temp_dir = output_dir is None
@@ -615,38 +633,42 @@ Color Coding:
     # Create or use output directory
     if use_temp_dir:
         base_temp_dir = tempfile.mkdtemp(prefix="ppt_compare_")
-        print(f"Created temporary directory: {base_temp_dir}")
+        if debug:
+            print(f"Created temporary directory: {base_temp_dir}")
     else:
         base_temp_dir = output_dir
         os.makedirs(base_temp_dir, exist_ok=True)
-        print(f"Using output directory: {base_temp_dir}")
+        if debug:
+            print(f"Using output directory: {base_temp_dir}")
     
     try:
         # Process both PowerPoint files
-        output_dir1 = process_powerpoint(file1, base_temp_dir)
-        output_dir2 = process_powerpoint(file2, base_temp_dir)
+        output_dir1 = process_powerpoint(file1, base_temp_dir, debug)
+        output_dir2 = process_powerpoint(file2, base_temp_dir, debug)
         
-        print("\n" + "="*60)
-        print("CONVERSION COMPLETE")
-        print("="*60)
-        print(f"\nFile 1 images: {output_dir1}")
-        print(f"File 2 images: {output_dir2}")
-        print(f"\nBase output directory: {base_temp_dir}")
-        
-        if not use_temp_dir:
-            print("\nNote: Output files have been saved and will NOT be deleted.")
+        if debug:
+            print("\n" + "="*60)
+            print("CONVERSION COMPLETE")
+            print("="*60)
+            print(f"\nFile 1 images: {output_dir1}")
+            print(f"File 2 images: {output_dir2}")
+            print(f"\nBase output directory: {base_temp_dir}")
+            
+            if not use_temp_dir:
+                print("\nNote: Output files have been saved and will NOT be deleted.")
         
         # Compare slides between the two presentations
-        comparisons, hashes1, hashes2 = compare_slides(output_dir1, output_dir2)
+        comparisons, hashes1, hashes2 = compare_slides(output_dir1, output_dir2, debug)
         
         # Generate comparison PDF
         pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
-        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_moved_pages)
+        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_moved_pages, debug)
         
         print(f"\nComparison PDF: {pdf_path}")
         
         # Open the PDF
-        print("\nOpening PDF...")
+        if debug:
+            print("\nOpening PDF...")
         try:
             if sys.platform == 'darwin':  # macOS
                 subprocess.run(['open', pdf_path], check=True)
@@ -654,7 +676,8 @@ Color Coding:
                 os.startfile(pdf_path)
             else:  # Linux
                 subprocess.run(['xdg-open', pdf_path], check=True)
-            print("PDF opened successfully")
+            if debug:
+                print("PDF opened successfully")
         except Exception as e:
             print(f"Could not open PDF automatically: {e}")
             print(f"Please open manually: {pdf_path}")
@@ -662,9 +685,11 @@ Color Coding:
         # If using temporary directory, wait for user to view PDF then clean up
         if use_temp_dir:
             input("\nPress Enter to close the PDF and clean up temporary files...")
-            print("\nCleaning up temporary files...")
+            if debug:
+                print("\nCleaning up temporary files...")
             shutil.rmtree(base_temp_dir)
-            print("Temporary files deleted.")
+            if debug:
+                print("Temporary files deleted.")
         
     except Exception as e:
         print(f"\nError during processing: {e}")
