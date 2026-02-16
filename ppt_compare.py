@@ -167,7 +167,7 @@ def compare_slides(dir1, dir2):
     return comparisons, hashes1, hashes2
 
 
-def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True):
+def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_common=True, show_arrows=False):
     """Generate a PDF with side-by-side slide comparisons"""
     print("\n" + "="*60)
     print("GENERATING COMPARISON PDF")
@@ -177,6 +177,9 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
         print("Suppressing common slides (matched slides will be excluded)")
     else:
         print("Including all slides (matched slides will be shown)")
+    
+    if show_arrows:
+        print("Drawing arrows for repositioned slides")
     
     # Use landscape letter size for side-by-side comparison
     page_width, page_height = landscape(letter)
@@ -286,6 +289,43 @@ def generate_comparison_pdf(dir1, dir2, output_path, comparisons, suppress_commo
         c.setLineWidth(1)
         c.line(page_width / 2, margin, page_width / 2, page_height - margin)
         
+        # Draw arrow if slides are repositioned (different slide numbers) and show_arrows is enabled
+        if show_arrows and comparison_type == 'matched' and slide1 != slide2:
+            # Arrow from right edge of left image to left edge of right image
+            arrow_start_x = page_width / 2 - margin / 2
+            arrow_end_x = page_width / 2 + margin / 2
+            arrow_y = page_height / 2
+            
+            # Draw arrow line
+            c.setStrokeColorRGB(0.2, 0.2, 0.8)  # Blue arrow
+            c.setLineWidth(2)
+            c.line(arrow_start_x, arrow_y, arrow_end_x, arrow_y)
+            
+            # Draw arrowhead using path
+            arrow_size = 10
+            c.setFillColorRGB(0.2, 0.2, 0.8)
+            c.setStrokeColorRGB(0.2, 0.2, 0.8)
+            
+            # Right-pointing arrowhead using path object
+            from reportlab.graphics.shapes import Path
+            from reportlab.graphics import renderPDF
+            from reportlab.graphics.shapes import Drawing, Polygon
+            
+            # Create arrowhead as a filled polygon
+            p = c.beginPath()
+            p.moveTo(arrow_end_x, arrow_y)
+            p.lineTo(arrow_end_x - arrow_size, arrow_y - arrow_size/2)
+            p.lineTo(arrow_end_x - arrow_size, arrow_y + arrow_size/2)
+            p.close()
+            c.drawPath(p, fill=1, stroke=0)
+            
+            # Add text label showing the slide number change
+            c.setFillColorRGB(0.2, 0.2, 0.8)
+            c.setFont("Helvetica-Bold", 10)
+            label_text = f"{slide1} → {slide2}"
+            text_width = c.stringWidth(label_text, "Helvetica-Bold", 10)
+            c.drawString(page_width / 2 - text_width / 2, arrow_y + 15, label_text)
+        
         c.showPage()
         pages_added += 1
     
@@ -355,12 +395,17 @@ Color Coding:
                                action='store_false',
                                help='Show all slides including common ones')
     
+    parser.add_argument('--show-arrows', dest='show_arrows',
+                       action='store_true', default=False,
+                       help='Draw arrows between source and target for repositioned slides')
+    
     args = parser.parse_args()
     
     file1 = args.file1
     file2 = args.file2
     output_dir = args.output_dir
     suppress_common = args.suppress_common
+    show_arrows = args.show_arrows
     
     # Determine if we should use temporary directory and clean up
     use_temp_dir = output_dir is None
@@ -403,7 +448,7 @@ Color Coding:
         
         # Generate comparison PDF
         pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
-        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common)
+        generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_arrows)
         
         print(f"\nComparison PDF: {pdf_path}")
         
