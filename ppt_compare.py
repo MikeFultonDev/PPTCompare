@@ -11,7 +11,9 @@ import hashlib
 import shutil
 import subprocess
 import argparse
+import time
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
@@ -40,15 +42,22 @@ def compute_sha256(file_path):
     return sha256_hash.hexdigest()
 
 
-def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False):
-    """Convert PowerPoint to images using LibreOffice (cross-platform)"""
+def convert_ppt_to_pdf_only(ppt_path, output_dir, debug=False, instance_id=None):
+    """Convert PowerPoint to PDF using LibreOffice (for parallel processing)
+    
+    Args:
+        ppt_path: Path to PowerPoint file
+        output_dir: Directory for output files
+        debug: Enable debug output
+        instance_id: Unique ID for parallel LibreOffice instances (enables separate user profiles)
+        
+    Returns:
+        Path to generated PDF file
+    """
     import subprocess
     
     if debug:
         print(f"  Converting {Path(ppt_path).name} to PDF...")
-    
-    # First convert to PDF
-    ppt_name = Path(ppt_path).stem
     
     # Try different LibreOffice command names
     libreoffice_commands = ['libreoffice', 'soffice']
@@ -56,8 +65,21 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False):
     pdf_created = False
     for cmd in libreoffice_commands:
         try:
+            # Build command with separate user installation for parallel processing
+            cmd_args = [cmd, '--headless', '--convert-to', 'pdf', '--outdir', output_dir]
+            
+            # Add separate user installation if instance_id provided (for parallel processing)
+            if instance_id is not None:
+                user_install_dir = f"/tmp/libreoffice_instance_{instance_id}"
+                cmd_args.extend(['-env:UserInstallation=file://' + user_install_dir])
+                # Also use unique port for socket connection
+                port = 2001 + instance_id
+                cmd_args.extend([f'--accept=socket,host=127.0.0.1,port={port};urp;'])
+            
+            cmd_args.append(str(Path(ppt_path).absolute()))
+            
             result = subprocess.run(
-                [cmd, '--headless', '--convert-to', 'pdf', '--outdir', output_dir, str(Path(ppt_path).absolute())],
+                cmd_args,
                 capture_output=True,
                 text=True,
                 timeout=60
@@ -77,9 +99,71 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False):
     if not pdf_files:
         raise RuntimeError("PDF conversion failed")
     
-    temp_pdf = str(pdf_files[0])
-    if debug:
-        print(f"  PDF created: {temp_pdf}")
+    return str(pdf_files[0])
+
+
+def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False, perf_timings=None, pdf_path=None):
+    """Convert PowerPoint to images using LibreOffice (cross-platform)
+    
+    Args:
+        ppt_path: Path to PowerPoint file
+        output_dir: Directory for output files
+        debug: Enable debug output
+        perf_timings: Dictionary for performance timing
+        pdf_path: Pre-converted PDF path (if already converted in parallel)
+    """
+    import subprocess
+    
+    # First convert to PDF (if not already done)
+    ppt_name = Path(ppt_path).stem
+    
+    if pdf_path is None:
+        if debug:
+            print(f"  Converting {Path(ppt_path).name} to PDF...")
+        
+        if perf_timings is not None:
+            pdf_start = time.time()
+        
+        # Try different LibreOffice command names
+        libreoffice_commands = ['libreoffice', 'soffice']
+        
+        pdf_created = False
+        for cmd in libreoffice_commands:
+            try:
+                result = subprocess.run(
+                    [cmd, '--headless', '--convert-to', 'pdf', '--outdir', output_dir, str(Path(ppt_path).absolute())],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if result.returncode == 0:
+                    pdf_created = True
+                    break
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        
+        if not pdf_created:
+            raise RuntimeError("LibreOffice not found. Please install LibreOffice.")
+        
+        # Find the generated PDF
+        pdf_files = list(Path(output_dir).glob("*.pdf"))
+        if not pdf_files:
+            raise RuntimeError("PDF conversion failed")
+        
+        temp_pdf = str(pdf_files[0])
+        
+        if debug:
+            print(f"  PDF created: {temp_pdf}")
+        
+        if perf_timings is not None:
+            pdf_end = time.time()
+            perf_timings.setdefault('pptx_to_pdf', 0)
+            perf_timings['pptx_to_pdf'] += (pdf_end - pdf_start)
+    else:
+        temp_pdf = pdf_path
+        if debug:
+            print(f"  Using pre-converted PDF: {temp_pdf}")
     
     # Convert PDF to images
     if not PDF2IMAGE_AVAILABLE:
@@ -87,7 +171,19 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False):
     
     if debug:
         print(f"  Converting PDF to PNG images...")
+    
+    if perf_timings is not None:
+        png_start = time.time()
+    
     images = convert_from_path(temp_pdf, dpi=150)
+    
+    if perf_timings is not None:
+        png_end = time.time()
+        perf_timings.setdefault('pdf_to_png', 0)
+        perf_timings['pdf_to_png'] += (png_end - png_start)
+    
+    if perf_timings is not None:
+        hash_start = time.time()
     
     for i, image in enumerate(images, start=1):
         output_path = os.path.join(output_dir, f"slide_{i:03d}.png")
@@ -102,6 +198,11 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False):
         if debug:
             print(f"    Slide {i} -> {output_path}")
             print(f"             SHA-256: {sha256_hash}")
+    
+    if perf_timings is not None:
+        hash_end = time.time()
+        perf_timings.setdefault('save_and_hash', 0)
+        perf_timings['save_and_hash'] += (hash_end - hash_start)
     
     # Clean up temporary PDF
     if os.path.exists(temp_pdf):
@@ -536,8 +637,144 @@ def _render_comparison_page_with_arrows(c, dir1, dir2, comparison_type, slide1, 
     c.showPage()
 
 
-def process_powerpoint(ppt_path, base_temp_dir, debug=False):
-    """Process a single PowerPoint file and convert slides to PNG images"""
+def open_pdf_and_wait(pdf_path, debug=False):
+    """Open a PDF file and wait for the viewer to close before returning.
+    
+    Args:
+        pdf_path: Path to the PDF file to open
+        debug: Enable debug output
+        
+    Returns:
+        True if PDF was opened successfully, False otherwise
+    """
+    import time
+    
+    if not os.path.exists(pdf_path):
+        print(f"Error: PDF file not found: {pdf_path}")
+        return False
+    
+    if debug:
+        print(f"\nOpening PDF: {pdf_path}")
+        print("Waiting for PDF viewer to close...")
+    
+    try:
+        if sys.platform == 'darwin':  # macOS
+            # Get absolute path
+            abs_pdf_path = os.path.abspath(pdf_path)
+            
+            # Get list of Preview PIDs before opening
+            result_before = subprocess.run(
+                ['pgrep', '-x', 'Preview'],
+                capture_output=True,
+                text=True
+            )
+            pids_before = set(result_before.stdout.strip().split('\n')) if result_before.returncode == 0 else set()
+            
+            # Open the PDF with Preview explicitly
+            subprocess.run(['open', '-a', 'Preview', abs_pdf_path], check=True)
+            
+            # Wait for Preview to start
+            time.sleep(1)
+            
+            # Get PIDs after opening
+            result_after = subprocess.run(
+                ['pgrep', '-x', 'Preview'],
+                capture_output=True,
+                text=True
+            )
+            pids_after = set(result_after.stdout.strip().split('\n')) if result_after.returncode == 0 else set()
+            
+            # Find new Preview PIDs
+            new_pids = pids_after - pids_before
+            
+            if new_pids:
+                # Monitor the new Preview process
+                target_pid = list(new_pids)[0]
+                print(f"\nPDF opened in Preview (PID: {target_pid}). Close the Preview window when done...")
+                if debug:
+                    print(f"Monitoring Preview process: {target_pid}")
+                
+                while True:
+                    # Check if the process still exists
+                    result = subprocess.run(
+                        ['ps', '-p', target_pid],
+                        capture_output=True
+                    )
+                    
+                    if result.returncode != 0:
+                        if debug:
+                            print("Preview process terminated")
+                        break
+                    
+                    time.sleep(0.5)
+            else:
+                # Preview was already running, fall back to file monitoring
+                print(f"\nPDF opened in existing Preview. Close the Preview window when done...")
+                if debug:
+                    print(f"Monitoring file: {abs_pdf_path}")
+                
+                # Wait a bit for the file to be opened
+                time.sleep(1)
+                
+                while True:
+                    # Check if file is still open
+                    result = subprocess.run(
+                        ['lsof', abs_pdf_path],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if result.returncode != 0:
+                        if debug:
+                            print("File no longer open")
+                        break
+                    
+                    time.sleep(0.5)
+            
+            return True
+            
+        elif sys.platform == 'win32':  # Windows
+            # Use start /wait with proper shell handling
+            result = subprocess.run(
+                f'start /wait "" "{pdf_path}"',
+                shell=True,
+                check=True
+            )
+            if debug:
+                print("PDF viewer closed")
+            return True
+            
+        else:  # Linux and other Unix-like systems
+            # xdg-open doesn't wait, so we need to prompt the user
+            subprocess.Popen(['xdg-open', pdf_path])
+            print("\nPDF opened in default viewer.")
+            print("Press Enter when you're done viewing to continue...")
+            input()
+            if debug:
+                print("User confirmed viewer closed")
+            return True
+            
+    except subprocess.CalledProcessError as e:
+        print(f"Error opening PDF: {e}")
+        return False
+    except FileNotFoundError:
+        print("Error: Could not find PDF viewer application")
+        return False
+    except Exception as e:
+        print(f"Unexpected error opening PDF: {e}")
+        return False
+
+
+def process_powerpoint(ppt_path, base_temp_dir, debug=False, perf_timings=None, pdf_path=None):
+    """Process a single PowerPoint file and convert slides to PNG images
+    
+    Args:
+        ppt_path: Path to PowerPoint file
+        base_temp_dir: Base directory for output
+        debug: Enable debug output
+        perf_timings: Dictionary for performance timing
+        pdf_path: Pre-converted PDF path (if already converted in parallel)
+    """
     
     if not os.path.exists(ppt_path):
         raise FileNotFoundError(f"PowerPoint file not found: {ppt_path}")
@@ -552,7 +789,7 @@ def process_powerpoint(ppt_path, base_temp_dir, debug=False):
         print(f"Output directory: {output_dir}")
     
     try:
-        slide_count = convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug)
+        slide_count = convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug, perf_timings, pdf_path)
         if debug:
             print(f"  Successfully converted {slide_count} slides")
         return output_dir
@@ -600,6 +837,53 @@ def get_git_committed_version(file_path, temp_dir):
         return committed_file
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get committed version of {file_path}: {e.stderr.decode()}")
+
+
+def print_performance_report(timings):
+    """Print a performance report showing time spent in each stage"""
+    print("\n" + "="*60)
+    print("PERFORMANCE REPORT")
+    print("="*60)
+    
+    total_time = timings.get('total', 0)
+    
+    # Calculate stage times
+    stages = [
+        ('Setup & Validation', timings.get('setup_end', 0) - timings.get('start', 0)),
+        ('PPTX→PDF (Parallel)', timings.get('pdf_convert_end', 0) - timings.get('pdf_convert_start', 0)),
+        ('PDF→PNG + Hashing', timings.get('convert_end', 0) - timings.get('convert_start', 0)),
+        ('Compare Slides', timings.get('compare_end', 0) - timings.get('compare_start', 0)),
+        ('Generate PDF', timings.get('pdf_end', 0) - timings.get('pdf_start', 0)),
+    ]
+    
+    print(f"\n{'Stage':<30} {'Time (s)':<12} {'% of Total':<12}")
+    print("-" * 60)
+    
+    for stage_name, stage_time in stages:
+        if stage_time > 0:
+            percentage = (stage_time / total_time * 100) if total_time > 0 else 0
+            print(f"{stage_name:<30} {stage_time:>10.2f}s  {percentage:>10.1f}%")
+    
+    print("-" * 60)
+    print(f"{'TOTAL':<30} {total_time:>10.2f}s  {100.0:>10.1f}%")
+    
+    # Print detailed breakdown of conversion stages
+    if any(key in timings for key in ['pptx_to_pdf', 'pdf_to_png', 'save_and_hash']):
+        print("\nDetailed Conversion Breakdown:")
+        print("-" * 60)
+        
+        conversion_stages = [
+            ('  PPTX to PDF (LibreOffice)', timings.get('pptx_to_pdf', 0)),
+            ('  PDF to PNG (pdf2image)', timings.get('pdf_to_png', 0)),
+            ('  Save PNG & Compute Hashes', timings.get('save_and_hash', 0)),
+        ]
+        
+        for stage_name, stage_time in conversion_stages:
+            if stage_time > 0:
+                percentage = (stage_time / total_time * 100) if total_time > 0 else 0
+                print(f"{stage_name:<30} {stage_time:>10.2f}s  {percentage:>10.1f}%")
+    
+    print("="*60)
 
 
 def main():
@@ -653,6 +937,9 @@ Color Coding:
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output showing detailed processing information')
     
+    parser.add_argument('--perf', action='store_true',
+                       help='Show performance timing for different stages of processing')
+    
     parser.add_argument('--git', action='store_true', default=False,
                        help='Compare current file with last committed version (only file1 is used)')
     
@@ -664,7 +951,13 @@ Color Coding:
     suppress_common = args.suppress_common
     show_moved_pages = args.show_moved_pages
     debug = args.debug
+    perf = args.perf
     use_git = args.git
+    
+    # Initialize performance timing dictionary
+    timings = {}
+    if perf:
+        timings['start'] = time.time()
     
     # Validate git mode usage
     if use_git:
@@ -722,9 +1015,50 @@ Color Coding:
             print(f"Using output directory: {base_temp_dir}")
     
     try:
-        # Process both PowerPoint files
-        output_dir1 = process_powerpoint(file1, base_temp_dir, debug)
-        output_dir2 = process_powerpoint(file2, base_temp_dir, debug)
+        if perf:
+            timings['setup_end'] = time.time()
+            timings['pdf_convert_start'] = time.time()
+        
+        # Step 1: Convert both PowerPoint files to PDF in parallel
+        # Each LibreOffice instance gets its own user profile and socket connection
+        ppt_name1 = Path(file1).stem
+        ppt_name2 = Path(file2).stem
+        output_dir1 = os.path.join(base_temp_dir, ppt_name1)
+        output_dir2 = os.path.join(base_temp_dir, ppt_name2)
+        os.makedirs(output_dir1, exist_ok=True)
+        os.makedirs(output_dir2, exist_ok=True)
+        
+        with ProcessPoolExecutor(max_workers=2) as executor:
+            future1 = executor.submit(convert_ppt_to_pdf_only, file1, output_dir1, debug, 0)
+            future2 = executor.submit(convert_ppt_to_pdf_only, file2, output_dir2, debug, 1)
+            
+            # Wait for both PDF conversions to complete
+            pdf_path1 = future1.result()
+            pdf_path2 = future2.result()
+        
+        if perf:
+            timings['pdf_convert_end'] = time.time()
+            timings['convert_start'] = time.time()
+        
+        # Step 2: Convert PDFs to images sequentially (this is fast and doesn't benefit from parallelization)
+        if debug:
+            print(f"\nProcessing: {file1}")
+            print(f"Output directory: {output_dir1}")
+        
+        slide_count1 = convert_ppt_to_images_libreoffice(file1, output_dir1, debug, timings if perf else None, pdf_path1)
+        if debug:
+            print(f"  Successfully converted {slide_count1} slides")
+        
+        if debug:
+            print(f"\nProcessing: {file2}")
+            print(f"Output directory: {output_dir2}")
+        
+        slide_count2 = convert_ppt_to_images_libreoffice(file2, output_dir2, debug, timings if perf else None, pdf_path2)
+        if debug:
+            print(f"  Successfully converted {slide_count2} slides")
+        
+        if perf:
+            timings['convert_end'] = time.time()
         
         if debug:
             print("\n" + "="*60)
@@ -737,12 +1071,24 @@ Color Coding:
             if not use_temp_dir:
                 print("\nNote: Output files have been saved and will NOT be deleted.")
         
+        if perf:
+            timings['compare_start'] = time.time()
+        
         # Compare slides between the two presentations
         comparisons, hashes1, hashes2 = compare_slides(output_dir1, output_dir2, debug)
+        
+        if perf:
+            timings['compare_end'] = time.time()
+            timings['pdf_start'] = time.time()
         
         # Generate comparison PDF
         pdf_path = os.path.join(base_temp_dir, "comparison.pdf")
         generate_comparison_pdf(output_dir1, output_dir2, pdf_path, comparisons, suppress_common, show_moved_pages, debug)
+        
+        if perf:
+            timings['pdf_end'] = time.time()
+            timings['total'] = timings['pdf_end'] - timings['start']
+            print_performance_report(timings)
         
         # Check if PDF has content (file size > 1KB indicates it has pages)
         pdf_has_content = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1024
@@ -750,47 +1096,33 @@ Color Coding:
         if pdf_has_content:
             print(f"\nComparison PDF: {pdf_path}")
             
-            # Open the PDF
-            if debug:
-                print("\nOpening PDF...")
-            try:
-                if sys.platform == 'darwin':  # macOS
-                    subprocess.run(['open', pdf_path], check=True)
-                elif sys.platform == 'win32':  # Windows
-                    os.startfile(pdf_path)
-                else:  # Linux
-                    subprocess.run(['xdg-open', pdf_path], check=True)
-                if debug:
-                    print("PDF opened successfully")
-            except Exception as e:
-                print(f"Could not open PDF automatically: {e}")
+            # Open the PDF and wait for viewer to close
+            pdf_opened = open_pdf_and_wait(pdf_path, debug)
+            
+            if not pdf_opened:
+                print(f"\nCould not open PDF automatically.")
                 print(f"Please open manually: {pdf_path}")
+                print("Press Enter when done viewing to clean up...")
+                input()
         else:
             print(f"\nNo differences found between the presentations.")
             print(f"All slides are identical (comparison PDF not generated).")
             if suppress_common:
                 print(f"Tip: Use --no-suppress-common-slides to see all slides in the comparison.")
         
-        # If using temporary directory, wait for user to view PDF then clean up
+        # Clean up temporary directories after PDF viewer closes
         if use_temp_dir:
-            input("\nPress Enter to close the PDF and clean up temporary files...")
             if debug:
                 print("\nCleaning up temporary files...")
             shutil.rmtree(base_temp_dir)
             if debug:
                 print("Temporary files deleted.")
-            
-            # Clean up git temporary directory if used (after main temp dir cleanup)
-            if use_git:
-                if debug:
-                    print("Cleaning up git temporary files...")
-                shutil.rmtree(git_temp_dir)
-        else:
-            # If not using temp dir, still need to clean up git temp dir immediately
-            if use_git:
-                if debug:
-                    print("Cleaning up git temporary files...")
-                shutil.rmtree(git_temp_dir)
+        
+        # Clean up git temporary directory if used
+        if use_git:
+            if debug:
+                print("Cleaning up git temporary files...")
+            shutil.rmtree(git_temp_dir)
         
     except Exception as e:
         print(f"\nError during processing: {e}")
