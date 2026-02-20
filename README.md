@@ -60,7 +60,7 @@ python ppt_compare.py <file1.pptx> <file2.pptx> [output_dir] [options]
 ### Options
 - `--debug` - Enable debug output showing detailed processing information
 - `--perf` - Show performance timing for different stages of processing
-- `--git` - Compare current file with last committed version (only file1 is used)
+- `--gitdiff` - Compare current file with last committed version (only file1 is used)
 - `--suppress-common-slides` - Suppress slides present in both presentations (default)
 - `--no-suppress-common-slides` - Show all slides including common ones
 - `--show-moved-pages` - Show slides in original order with arrows for repositioned slides (default)
@@ -86,7 +86,7 @@ Shows detailed timing breakdown of parallel processing stages.
 **Compare with git (current vs last committed):**
 ```bash
 source venv/bin/activate
-python ppt_compare.py presentation.pptx --git
+python ppt_compare.py presentation.pptx --gitdiff
 ```
 
 **With specified output directory (files preserved):**

@@ -890,7 +890,7 @@ Examples:
   python ppt_compare.py file1.pptx file2.pptx --perf
   
   # Compare current file with last committed version
-  python ppt_compare.py presentation.pptx --git
+  python ppt_compare.py presentation.pptx --gitdiff
   
   # Show all slides including common ones
   python ppt_compare.py file1.pptx file2.pptx --no-suppress-common-slides
@@ -914,8 +914,8 @@ Color Coding:
         '''
     )
     
-    parser.add_argument('file1', help='First PowerPoint file (source), or the only file when using --git')
-    parser.add_argument('file2', nargs='?', default=None, help='Second PowerPoint file (target), not used with --git')
+    parser.add_argument('file1', help='First PowerPoint file (source), or the only file when using --gitdiff')
+    parser.add_argument('file2', nargs='?', default=None, help='Second PowerPoint file (target), not used with --gitdiff')
     parser.add_argument('output_dir', nargs='?', default=None,
                        help='Optional output directory (uses temp dir if not specified)')
     
@@ -941,7 +941,7 @@ Color Coding:
     parser.add_argument('--perf', action='store_true',
                        help='Show performance timing for different stages of processing')
     
-    parser.add_argument('--git', action='store_true', default=False,
+    parser.add_argument('--gitdiff', action='store_true', default=False,
                        help='Compare current file with last committed version (only file1 is used)')
     
     args = parser.parse_args()
@@ -953,7 +953,7 @@ Color Coding:
     show_moved_pages = args.show_moved_pages
     debug = args.debug
     perf = args.perf
-    use_git = args.git
+    use_git = args.gitdiff
     
     # Initialize performance timing dictionary
     timings = {}
