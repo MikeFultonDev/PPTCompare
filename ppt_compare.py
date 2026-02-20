@@ -825,6 +825,147 @@ def get_git_committed_version(file_path, temp_dir):
         raise RuntimeError(f"Failed to get committed version of {file_path}: {e.stderr.decode()}")
 
 
+def get_git_pr_versions(file_path, pr_number, temp_dir, debug=False):
+    """Get both main branch and PR versions of a file from git
+    
+    Args:
+        file_path: Path to the file to compare
+        pr_number: Pull request number
+        temp_dir: Temporary directory to store fetched files
+        debug: Enable debug output
+        
+    Returns:
+        tuple: (main_version_path, pr_version_path)
+    """
+    try:
+        # Convert to absolute path
+        abs_file_path = os.path.abspath(file_path)
+        
+        # Get the git repository root
+        git_root_result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            check=True,
+            text=True,
+            cwd=os.path.dirname(abs_file_path)
+        )
+        git_root = git_root_result.stdout.strip()
+        
+        # Get relative path from git root
+        rel_path = os.path.relpath(abs_file_path, git_root)
+        
+        if debug:
+            print(f"Git root: {git_root}")
+            print(f"Relative path: {rel_path}")
+        
+        # Get the default branch name
+        default_branch_result = subprocess.run(
+            ['git', 'symbolic-ref', 'refs/remotes/origin/HEAD'],
+            capture_output=True,
+            text=True,
+            cwd=git_root
+        )
+        
+        if default_branch_result.returncode == 0:
+            default_branch = default_branch_result.stdout.strip().replace('refs/remotes/origin/', '')
+        else:
+            # Fallback to 'main' if we can't determine the default branch
+            default_branch = 'main'
+        
+        if debug:
+            print(f"Default branch: {default_branch}")
+        
+        # Fetch the PR branch
+        if debug:
+            print(f"Fetching PR #{pr_number}...")
+        
+        fetch_result = subprocess.run(
+            ['git', 'fetch', 'origin', f'pull/{pr_number}/head:pr-{pr_number}'],
+            capture_output=True,
+            text=True,
+            cwd=git_root
+        )
+        
+        if fetch_result.returncode != 0:
+            raise RuntimeError(f"Failed to fetch PR #{pr_number}: {fetch_result.stderr}")
+        
+        if debug:
+            print(f"Successfully fetched PR #{pr_number}")
+        
+        # Get file from default branch
+        if debug:
+            print(f"Getting file from {default_branch} branch...")
+        
+        main_result = subprocess.run(
+            ['git', 'show', f'origin/{default_branch}:{rel_path}'],
+            capture_output=True,
+            cwd=git_root
+        )
+        
+        file_exists_in_main = main_result.returncode == 0
+        
+        if not file_exists_in_main:
+            if debug:
+                print(f"File does not exist in {default_branch} branch (new file in PR)")
+        
+        # Get file from PR branch
+        if debug:
+            print(f"Getting file from PR branch...")
+        
+        pr_result = subprocess.run(
+            ['git', 'show', f'pr-{pr_number}:{rel_path}'],
+            capture_output=True,
+            check=True,
+            cwd=git_root
+        )
+        
+        # Create temporary files
+        file_name = Path(file_path).name
+        base_name = Path(file_path).stem
+        extension = Path(file_path).suffix
+        
+        main_file = os.path.join(temp_dir, f"{base_name}_main{extension}")
+        pr_file = os.path.join(temp_dir, f"{base_name}_pr{pr_number}{extension}")
+        
+        # Write main version (or create empty placeholder if file doesn't exist in default branch)
+        if file_exists_in_main:
+            with open(main_file, 'wb') as f:
+                f.write(main_result.stdout)
+        else:
+            # Create an empty PowerPoint file as placeholder
+            if PYTHON_PPTX_AVAILABLE:
+                from pptx import Presentation
+                prs = Presentation()
+                # Add a blank slide to make it valid
+                blank_slide_layout = prs.slide_layouts[6]  # Blank layout
+                prs.slides.add_slide(blank_slide_layout)
+                prs.save(main_file)
+                if debug:
+                    print(f"Created empty placeholder PowerPoint for main branch")
+            else:
+                raise RuntimeError("python-pptx is required to create placeholder for new files in PR")
+        
+        with open(pr_file, 'wb') as f:
+            f.write(pr_result.stdout)
+        
+        if debug:
+            print(f"Main version saved to: {main_file}")
+            print(f"PR version saved to: {pr_file}")
+        
+        # Clean up the temporary PR branch
+        subprocess.run(
+            ['git', 'branch', '-D', f'pr-{pr_number}'],
+            capture_output=True,
+            cwd=git_root
+        )
+        
+        return main_file, pr_file
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        raise RuntimeError(f"Failed to get PR versions: {error_msg}")
+
+
 def print_performance_report(timings):
     """Print a performance report showing time spent in each stage"""
     print("\n" + "="*60)
@@ -892,6 +1033,11 @@ Examples:
   # Compare current file with last committed version
   python ppt_compare.py presentation.pptx --gitdiff
   
+  # Compare file from main branch with PR version
+  python ppt_compare.py presentation.pptx --gitpr 123
+  # or
+  python ppt_compare.py presentation.pptx --gitpr=123
+  
   # Show all slides including common ones
   python ppt_compare.py file1.pptx file2.pptx --no-suppress-common-slides
   
@@ -944,6 +1090,9 @@ Color Coding:
     parser.add_argument('--gitdiff', action='store_true', default=False,
                        help='Compare current file with last committed version (only file1 is used)')
     
+    parser.add_argument('--gitpr', type=int, metavar='NUM', default=None,
+                       help='Compare file from main branch with PR version (specify PR number)')
+    
     args = parser.parse_args()
     
     file1 = args.file1
@@ -954,6 +1103,7 @@ Color Coding:
     debug = args.debug
     perf = args.perf
     use_git = args.gitdiff
+    use_git_pr = args.gitpr
     
     # Initialize performance timing dictionary
     timings = {}
@@ -961,10 +1111,17 @@ Color Coding:
         timings['start'] = time.time()
     
     # Validate git mode usage
-    if use_git:
+    if use_git and use_git_pr:
+        print("Error: Cannot use both --gitdiff and --gitpr at the same time")
+        print("Usage: python ppt_compare.py file.pptx --gitdiff [output_dir]")
+        print("   or: python ppt_compare.py file.pptx --gitpr NUM [output_dir]")
+        sys.exit(1)
+    
+    if use_git or use_git_pr:
         if file2 is not None and file2 != output_dir:
-            print("Error: When using --git, only specify one file")
-            print("Usage: python ppt_compare.py file.pptx --git [output_dir]")
+            print("Error: When using --gitdiff or --gitpr, only specify one file")
+            print("Usage: python ppt_compare.py file.pptx --gitdiff [output_dir]")
+            print("   or: python ppt_compare.py file.pptx --gitpr NUM [output_dir]")
             sys.exit(1)
         # In git mode, file2 becomes output_dir if provided
         if file2 is not None:
@@ -974,12 +1131,13 @@ Color Coding:
     # Determine if we should use temporary directory and clean up
     use_temp_dir = output_dir is None
     
-    # Validate file1 exists
-    if not os.path.exists(file1):
+    # Validate file1 exists (skip for gitpr mode as we fetch from git)
+    if not use_git_pr and not os.path.exists(file1):
         print(f"Error: File not found: {file1}")
         sys.exit(1)
     
     # Handle git mode or regular mode
+    git_temp_dir = None
     if use_git:
         # Create temporary directory for git committed version
         git_temp_dir = tempfile.mkdtemp(prefix="ppt_git_")
@@ -993,12 +1151,30 @@ Color Coding:
             print(f"Error: {e}")
             shutil.rmtree(git_temp_dir)
             sys.exit(1)
+    elif use_git_pr:
+        # Create temporary directory for PR versions
+        git_temp_dir = tempfile.mkdtemp(prefix="ppt_gitpr_")
+        try:
+            if debug:
+                print(f"Getting versions of {file1} from main branch and PR #{use_git_pr}...")
+            main_version, pr_version = get_git_pr_versions(file1, use_git_pr, git_temp_dir, debug)
+            # Set file1 to main version and file2 to PR version
+            file1 = main_version
+            file2 = pr_version
+            if debug:
+                print(f"Main version: {file1}")
+                print(f"PR version: {file2}")
+        except Exception as e:
+            print(f"Error: {e}")
+            shutil.rmtree(git_temp_dir)
+            sys.exit(1)
     else:
         # Regular mode - validate file2 exists
         if file2 is None:
-            print("Error: Second file required when not using --git")
+            print("Error: Second file required when not using --gitdiff or --gitpr")
             print("Usage: python ppt_compare.py file1.pptx file2.pptx [output_dir]")
-            print("   or: python ppt_compare.py file.pptx --git [output_dir]")
+            print("   or: python ppt_compare.py file.pptx --gitdiff [output_dir]")
+            print("   or: python ppt_compare.py file.pptx --gitpr NUM [output_dir]")
             sys.exit(1)
         if not os.path.exists(file2):
             print(f"Error: File not found: {file2}")
@@ -1120,7 +1296,7 @@ Color Coding:
                 print("Temporary files deleted.")
         
         # Clean up git temporary directory if used
-        if use_git:
+        if git_temp_dir is not None:
             if debug:
                 print("Cleaning up git temporary files...")
             shutil.rmtree(git_temp_dir)
@@ -1128,7 +1304,7 @@ Color Coding:
     except Exception as e:
         print(f"\nError during processing: {e}")
         print(f"\nTemporary directory (may contain partial results): {base_temp_dir}")
-        if use_git and 'git_temp_dir' in locals():
+        if git_temp_dir is not None:
             shutil.rmtree(git_temp_dir)
         sys.exit(1)
 

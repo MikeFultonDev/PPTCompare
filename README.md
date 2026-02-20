@@ -40,6 +40,25 @@ sudo apt-get install libreoffice poppler-utils
 
 ## Usage
 
+### Option 1: Using the Wrapper Script (macOS/Linux only)
+
+The easiest way to run the tool is using the provided wrapper script that automatically activates the virtual environment:
+
+```bash
+./ppt_compare.sh <file1.pptx> <file2.pptx> [output_dir] [options]
+```
+
+**Tip:** You can create a symbolic link to the script in a directory in your PATH (e.g., `~/bin`) to run it from anywhere:
+```bash
+ln -s /path/to/PPTCompare/ppt_compare.sh ~/bin/ppt_compare.sh
+# Then run from anywhere:
+ppt_compare.sh file1.pptx file2.pptx
+```
+
+**Note:** This script only works on macOS and Linux. Windows users should use Option 2 below.
+
+### Option 2: Manual Activation (All Platforms)
+
 **Always activate the virtual environment first:**
 ```bash
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -51,8 +70,8 @@ python ppt_compare.py <file1.pptx> <file2.pptx> [output_dir] [options]
 ```
 
 ### Arguments
-- `file1.pptx` - First PowerPoint file (source), or the only file when using --git
-- `file2.pptx` - Second PowerPoint file (target), not used with --git
+- `file1.pptx` - First PowerPoint file (source), or the only file when using --gitdiff or --gitpr
+- `file2.pptx` - Second PowerPoint file (target), not used with --gitdiff or --gitpr
 - `output_dir` - Optional output directory for results
   - If specified: Files are saved to this directory and preserved
   - If not specified: Uses temporary directory, displays PDF, then cleans up after viewer closes
@@ -61,6 +80,7 @@ python ppt_compare.py <file1.pptx> <file2.pptx> [output_dir] [options]
 - `--debug` - Enable debug output showing detailed processing information
 - `--perf` - Show performance timing for different stages of processing
 - `--gitdiff` - Compare current file with last committed version (only file1 is used)
+- `--gitpr NUM` or `--gitpr=NUM` - Compare file from main branch with PR version (specify PR number)
 - `--suppress-common-slides` - Suppress slides present in both presentations (default)
 - `--no-suppress-common-slides` - Show all slides including common ones
 - `--show-moved-pages` - Show slides in original order with arrows for repositioned slides (default)
@@ -69,43 +89,63 @@ python ppt_compare.py <file1.pptx> <file2.pptx> [output_dir] [options]
 
 ### Examples
 
+#### Using the Wrapper Script (macOS/Linux)
+
 **Basic comparison with temporary directory (auto-cleanup):**
 ```bash
-source venv/bin/activate
-python ppt_compare.py presentation1.pptx presentation2.pptx
+./ppt_compare.sh presentation1.pptx presentation2.pptx
 ```
 The PDF will open automatically. Close the PDF window when done to clean up temporary files.
 
 **With performance timing:**
 ```bash
-source venv/bin/activate
-python ppt_compare.py file1.pptx file2.pptx --perf
+./ppt_compare.sh file1.pptx file2.pptx --perf
 ```
 Shows detailed timing breakdown of parallel processing stages.
 
 **Compare with git (current vs last committed):**
 ```bash
-source venv/bin/activate
-python ppt_compare.py presentation.pptx --gitdiff
+./ppt_compare.sh presentation.pptx --gitdiff
 ```
+
+**Compare file from main branch with PR version:**
+```bash
+./ppt_compare.sh presentation.pptx --gitpr 123
+# or
+./ppt_compare.sh presentation.pptx --gitpr=123
+```
+This fetches the file from both the main branch and the specified PR, then compares them.
 
 **With specified output directory (files preserved):**
 ```bash
-source venv/bin/activate
-python ppt_compare.py presentation1.pptx presentation2.pptx ./output
+./ppt_compare.sh presentation1.pptx presentation2.pptx ./output
 ```
 All files including the PDF will be saved to `./output` and preserved.
 
 **Show all slides including common ones:**
 ```bash
-source venv/bin/activate
-python ppt_compare.py file1.pptx file2.pptx --no-suppress-common-slides
+./ppt_compare.sh file1.pptx file2.pptx --no-suppress-common-slides
 ```
 
 **With debug output:**
 ```bash
-source venv/bin/activate
-python ppt_compare.py file1.pptx file2.pptx --debug
+./ppt_compare.sh file1.pptx file2.pptx --debug
+```
+
+#### Manual Method (All Platforms)
+
+For Windows users or if you prefer manual activation:
+
+**Basic comparison:**
+```bash
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+python ppt_compare.py presentation1.pptx presentation2.pptx
+```
+
+**Compare with PR:**
+```bash
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+python ppt_compare.py presentation.pptx --gitpr 123
 ```
 
 ## Output
