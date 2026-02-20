@@ -880,8 +880,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
+  # Activate virtual environment first (required)
+  source venv/bin/activate  # On Windows: venv\\Scripts\\activate
+  
   # Compare two files
   python ppt_compare.py file1.pptx file2.pptx
+  
+  # Compare with performance timing
+  python ppt_compare.py file1.pptx file2.pptx --perf
   
   # Compare current file with last committed version
   python ppt_compare.py presentation.pptx --git
@@ -889,9 +895,18 @@ Examples:
   # Show all slides including common ones
   python ppt_compare.py file1.pptx file2.pptx --no-suppress-common-slides
   
-  # Save to specific directory
+  # Save to specific directory (files preserved)
   python ppt_compare.py file1.pptx file2.pptx ./output
   
+  # With debug output
+  python ppt_compare.py file1.pptx file2.pptx --debug
+
+Performance:
+  Uses parallel processing for optimal speed (~9s for 24-28 slide presentations)
+  - PPTX→PDF: Parallel conversion with separate LibreOffice instances
+  - PDF→PNG: Parallel conversion for both files
+  - Use --perf flag to see detailed timing breakdown
+
 Color Coding:
   - Light grey bar: Slide present in both presentations (matched)
   - Red bar: Slide only in source presentation
