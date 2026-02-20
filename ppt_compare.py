@@ -175,7 +175,7 @@ def convert_ppt_to_images_libreoffice(ppt_path, output_dir, debug=False, perf_ti
     if perf_timings is not None:
         png_start = time.time()
     
-    images = convert_from_path(temp_pdf, dpi=150)
+    images = convert_from_path(temp_pdf, dpi=100)
     
     if perf_timings is not None:
         png_end = time.time()
@@ -661,75 +661,61 @@ def open_pdf_and_wait(pdf_path, debug=False):
         if sys.platform == 'darwin':  # macOS
             # Get absolute path
             abs_pdf_path = os.path.abspath(pdf_path)
+            pdf_filename = os.path.basename(abs_pdf_path)
             
-            # Get list of Preview PIDs before opening
-            result_before = subprocess.run(
-                ['pgrep', '-x', 'Preview'],
-                capture_output=True,
-                text=True
-            )
-            pids_before = set(result_before.stdout.strip().split('\n')) if result_before.returncode == 0 else set()
-            
-            # Open the PDF with Preview explicitly
+            # Open the PDF with Preview
             subprocess.run(['open', '-a', 'Preview', abs_pdf_path], check=True)
             
-            # Wait for Preview to start
-            time.sleep(1)
+            print(f"\nPDF opened in Preview. Close the PDF window when done...")
+            if debug:
+                print(f"Monitoring for window: {pdf_filename}")
             
-            # Get PIDs after opening
-            result_after = subprocess.run(
-                ['pgrep', '-x', 'Preview'],
-                capture_output=True,
-                text=True
-            )
-            pids_after = set(result_after.stdout.strip().split('\n')) if result_after.returncode == 0 else set()
+            # Wait for Preview to open the file
+            time.sleep(2)
             
-            # Find new Preview PIDs
-            new_pids = pids_after - pids_before
+            # Monitor using AppleScript to check if the specific PDF window is still open
+            max_wait_time = 3600  # 1 hour maximum
+            start_time = time.time()
+            check_interval = 2.0  # Check every 2 seconds
             
-            if new_pids:
-                # Monitor the new Preview process
-                target_pid = list(new_pids)[0]
-                print(f"\nPDF opened in Preview (PID: {target_pid}). Close the Preview window when done...")
-                if debug:
-                    print(f"Monitoring Preview process: {target_pid}")
+            while (time.time() - start_time) < max_wait_time:
+                # Use AppleScript to check if Preview has a window with this PDF's name
+                applescript = f'''
+                tell application "Preview"
+                    set windowNames to name of every window
+                    set pdfOpen to false
+                    repeat with windowName in windowNames
+                        if windowName contains "{pdf_filename}" then
+                            set pdfOpen to true
+                            exit repeat
+                        end if
+                    end repeat
+                    return pdfOpen
+                end tell
+                '''
                 
-                while True:
-                    # Check if the process still exists
+                try:
                     result = subprocess.run(
-                        ['ps', '-p', target_pid],
-                        capture_output=True
-                    )
-                    
-                    if result.returncode != 0:
-                        if debug:
-                            print("Preview process terminated")
-                        break
-                    
-                    time.sleep(0.5)
-            else:
-                # Preview was already running, fall back to file monitoring
-                print(f"\nPDF opened in existing Preview. Close the Preview window when done...")
-                if debug:
-                    print(f"Monitoring file: {abs_pdf_path}")
-                
-                # Wait a bit for the file to be opened
-                time.sleep(1)
-                
-                while True:
-                    # Check if file is still open
-                    result = subprocess.run(
-                        ['lsof', abs_pdf_path],
+                        ['osascript', '-e', applescript],
                         capture_output=True,
-                        text=True
+                        text=True,
+                        timeout=5
                     )
                     
-                    if result.returncode != 0:
+                    # If the script returns "false", the window is closed
+                    if result.returncode == 0 and result.stdout.strip() == 'false':
                         if debug:
-                            print("File no longer open")
+                            print(f"PDF window closed: {pdf_filename}")
                         break
                     
-                    time.sleep(0.5)
+                except subprocess.TimeoutExpired:
+                    if debug:
+                        print("AppleScript timeout, continuing...")
+                
+                time.sleep(check_interval)
+            
+            if (time.time() - start_time) >= max_wait_time:
+                print("\nWarning: Timeout reached while waiting for PDF viewer to close")
             
             return True
             
@@ -1040,22 +1026,22 @@ Color Coding:
             timings['pdf_convert_end'] = time.time()
             timings['convert_start'] = time.time()
         
-        # Step 2: Convert PDFs to images sequentially (this is fast and doesn't benefit from parallelization)
+        # Step 2: Convert PDFs to images in parallel
         if debug:
-            print(f"\nProcessing: {file1}")
-            print(f"Output directory: {output_dir1}")
+            print("\nConverting PDFs to images in parallel...")
         
-        slide_count1 = convert_ppt_to_images_libreoffice(file1, output_dir1, debug, timings if perf else None, pdf_path1)
-        if debug:
-            print(f"  Successfully converted {slide_count1} slides")
+        with ProcessPoolExecutor(max_workers=2) as executor:
+            # Submit both conversions
+            future1 = executor.submit(convert_ppt_to_images_libreoffice, file1, output_dir1, debug, None, pdf_path1)
+            future2 = executor.submit(convert_ppt_to_images_libreoffice, file2, output_dir2, debug, None, pdf_path2)
+            
+            # Wait for both to complete and get results
+            slide_count1 = future1.result()
+            slide_count2 = future2.result()
         
         if debug:
-            print(f"\nProcessing: {file2}")
-            print(f"Output directory: {output_dir2}")
-        
-        slide_count2 = convert_ppt_to_images_libreoffice(file2, output_dir2, debug, timings if perf else None, pdf_path2)
-        if debug:
-            print(f"  Successfully converted {slide_count2} slides")
+            print(f"\nFile 1: Successfully converted {slide_count1} slides")
+            print(f"File 2: Successfully converted {slide_count2} slides")
         
         if perf:
             timings['convert_end'] = time.time()
